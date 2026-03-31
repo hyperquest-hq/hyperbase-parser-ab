@@ -1,0 +1,50 @@
+def get_spacy_models(lang):
+    if lang == 'de':
+        return [
+            'de_dep_news_trf',
+            'de_core_news_lg',
+            'de_core_news_md',
+            'de_core_news_sm'
+        ]
+    elif lang == 'en':
+        return [
+            'en_core_web_trf',
+            'en_core_web_lg',
+            'en_core_web_md',
+            'en_core_web_sm'
+        ]
+    elif lang == 'es':
+        return [
+            'es_dep_news_trf',
+            'es_core_news_lg',
+            'es_core_news_md',
+            'es_core_news_sm'
+        ]
+    elif lang == 'fr':
+        return [
+            'fr_dep_news_trf',
+            'fr_core_news_lg',
+            'fr_core_news_md',
+            'fr_core_news_sm'
+        ]
+    elif lang == 'it':
+        return [
+            'it_core_news_lg',
+            'it_core_news_md',
+            'it_core_news_sm'
+        ]
+    elif lang == 'pt':
+        return [
+            'pt_core_news_lg',
+            'pt_core_news_md',
+            'pt_core_news_sm'
+        ]
+    elif lang == 'zh':
+        return [
+            'zh_core_news_trf',
+            'zh_core_news_lg',
+            'zh_core_news_md',
+            'zh_core_news_sm'
+        ]
+    else:
+        return []
