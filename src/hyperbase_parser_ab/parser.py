@@ -1,40 +1,43 @@
 import re
 import traceback
+from typing import Any, cast
 
 import spacy
+from spacy.language import Language
+from spacy.tokens import Doc, Span, Token
 
 import hyperbase.constants as const
-from hyperbase.hyperedge import build_atom, hedge, non_unique, unique, UniqueAtom
+from hyperbase.hyperedge import Atom, Hyperedge, build_atom, hedge, non_unique, unique, UniqueAtom
 from hyperbase.parsers import Parser
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import get_spacy_models
-from hyperbase_parser_ab.rules import apply_rule, strict_rules, repair_rules
+from hyperbase_parser_ab.rules import apply_rule, Rule, strict_rules, repair_rules
 
 
-def _edge2txt_parts(edge, parse):
-    atoms = [UniqueAtom(atom) for atom in edge.all_atoms()]
-    tokens = [parse['atom2token'][atom] for atom in atoms if atom in parse['atom2token']]
-    txts = [token.text for token in tokens]
-    pos = [token.i for token in tokens]
+def _edge2txt_parts(edge: Hyperedge, parse: dict[str, Any]) -> list[tuple[str, str, int]]:
+    atoms: list[Atom] = [UniqueAtom(atom) for atom in edge.all_atoms()]
+    tokens: list[Token] = [parse['atom2token'][atom] for atom in atoms if atom in parse['atom2token']]
+    txts: list[str] = [token.text for token in tokens]
+    pos: list[int] = [token.i for token in tokens]
     return list(zip(txts, txts, pos))
 
 
-def _edge2text(edge, parse):
+def _edge2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
     if edge.not_atom and str(edge[0]) == const.possessive_builder:
         return _poss2text(edge, parse)
 
-    parts = _edge2txt_parts(edge, parse)
+    parts: list[tuple[str, str, int]] = _edge2txt_parts(edge, parse)
     parts = sorted(parts, key=lambda x: x[2])
 
-    prev_txt = None
-    txt_parts = []
-    sentence = str(parse['spacy_sentence'])
+    prev_txt: str | None = None
+    txt_parts: list[str] = []
+    sentence: str = str(parse['spacy_sentence'])
     for txt, _txt, _ in parts:
         if prev_txt is not None:
-            res = re.search(r'{}(.*?){}'.format(re.escape(prev_txt), re.escape(txt)), sentence)
+            res: re.Match[str] | None = re.search(r'{}(.*?){}'.format(re.escape(prev_txt), re.escape(txt)), sentence)
             if res:
-                sep = res.group(1)
+                sep: str = res.group(1)
             else:
                 sep = ' '
             if any(letter.isalnum() for letter in sep):
@@ -45,9 +48,9 @@ def _edge2text(edge, parse):
     return ''.join(txt_parts)
 
 
-def _concept_type_and_subtype(token):
-    pos = token.pos_
-    dep = token.dep_
+def _concept_type_and_subtype(token: Token) -> str:
+    pos: str = token.pos_
+    dep: str = token.dep_
     if dep == 'nmod':
         return 'Cm'
     if pos == 'ADJ':
@@ -66,9 +69,9 @@ def _concept_type_and_subtype(token):
         return 'C'
 
 
-def _modifier_type_and_subtype(token):
-    pos = token.pos_
-    dep = token.dep_
+def _modifier_type_and_subtype(token: Token) -> str:
+    pos: str = token.pos_
+    dep: str = token.dep_
     if dep in {'neg', 'nk'}:
         return 'Mn'
     elif dep in {'poss', 'pg', 'ag'}:
@@ -95,9 +98,9 @@ def _modifier_type_and_subtype(token):
         return 'M'
 
 
-def _builder_type_and_subtype(token):
-    pos = token.pos_
-    dep = token.dep_
+def _builder_type_and_subtype(token: Token) -> str:
+    pos: str = token.pos_
+    dep: str = token.dep_
     if dep in {'case', 'pg', 'ag'}:
         # if token.head.dep_ == 'poss':
         return 'Bp'
@@ -109,8 +112,8 @@ def _builder_type_and_subtype(token):
         return 'B'
 
 
-def _predicate_type_and_subtype(token):
-    dep = token.dep_
+def _predicate_type_and_subtype(token: Token) -> str:
+    dep: str = token.dep_
     if dep in {'advcl', 'csubj', 'csubjpass', 'parataxis'}:
         return 'Pd'
     elif dep in {'relcl', 'ccomp', 'acl', 'pcomp', 'xcomp', 'rc'}:
@@ -121,29 +124,29 @@ def _predicate_type_and_subtype(token):
         return 'P'
 
 
-def _predicate_post_type_and_subtype(edge, subparts, args_string):
+def _predicate_post_type_and_subtype(edge: Hyperedge, subparts: list[str], args_string: str) -> str:
     return subparts[0]
 
 
-def _is_verb(token):
+def _is_verb(token: Token) -> bool:
     return token.pos_ == 'VERB'
 
 
-def _poss2text(edge, parse):
-    part1 = _edge2text(edge[1], parse).strip()
-    part2 = _edge2text(edge[2], parse)
+def _poss2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
+    part1: str = _edge2text(edge[1], parse).strip()
+    part2: str = _edge2text(edge[2], parse)
     if part1[-1] == 's':
-        poss = "'"
+        poss: str = "'"
     else:
         poss = "'s"
     return f'{part1}{poss} {part2}'
 
 
-def _generate_tok_pos(atom2word, edge):
+def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -> str:
     if edge.atom:
-        atom = unique(edge)
-        if atom in atom2word:
-            return str(atom2word[atom][1])
+        uatom: Atom | None = cast(Atom, unique(edge))
+        if uatom is not None and uatom in atom2word:
+            return str(atom2word[uatom][1])
         else:
             return '-1'
     else:
@@ -151,69 +154,70 @@ def _generate_tok_pos(atom2word, edge):
 
 
 class AlphaBetaParser(Parser):
-    def __init__(self, lang, beta='repair', normalize=True, post_process=True, debug=False):
+    def __init__(self, lang: str, beta: str = 'repair', normalize: bool = True,
+                 post_process: bool = True, debug: bool = False) -> None:
         super().__init__()
-        
-        self.lang = lang
 
-        models = get_spacy_models(lang)
+        self.lang: str = lang
+
+        models: list[str] = get_spacy_models(lang)
 
         if len(models) == 0:
-            raise RuntimeError(f"Language code '{lang}' is not recognized / language is nor supported.")        
+            raise RuntimeError(f"Language code '{lang}' is not recognized / language is nor supported.")
 
-        self.nlp = None
+        self.nlp: Language | None = None
         for model in models:
             if spacy.util.is_package(model):
                 self.nlp = spacy.load(model)
                 print('Using language model: {}'.format(model))
                 break
         if self.nlp is None:
-            models_list = ", ".join(models)
+            models_list: str = ", ".join(models)
             raise RuntimeError(f"Language '{lang}' requires one of the following language models to be installed:\n"
                                f"{models_list}.")
-        
-        self.alpha = Alpha(use_atomizer=True)
+
+        self.alpha: Alpha = Alpha(use_atomizer=True)
 
         if beta == 'strict':
-            self.rules = strict_rules
+            self.rules: list[Rule] = strict_rules
         elif beta == 'repair':
             self.rules = repair_rules
         else:
             raise RuntimeError('unkown beta stage: {}'.format(beta))
-        self.normalize = normalize
-        self.post_process = post_process
-        self.debug = debug
+        self.normalize: bool = normalize
+        self.post_process: bool = post_process
+        self.debug: bool = debug
 
-        self.atom2token = {}
-        self.temp_atoms = set()
-        self.orig_atom = {}
-        self.token2atom = {}
-        self.depths = {}
-        self.connections = set()
-        self.edge2text = {}
-        self.edge2toks = {}
-        self.toks2edge = {}
-        self.cur_text = None
-        self.doc = None
-        self.beta = beta
+        self.atom2token: dict[Atom, Token] = {}
+        self.temp_atoms: set[Atom] = set()
+        self.orig_atom: dict[Atom, UniqueAtom] = {}
+        self.token2atom: dict[Token, Atom] = {}
+        self.depths: dict[Atom, int] = {}
+        self.connections: set[tuple[Atom, Atom]] = set()
+        self.edge2text: dict[Hyperedge, str] = {}
+        self.edge2toks: dict[Hyperedge, tuple[Token, ...]] = {}
+        self.toks2edge: dict[tuple[Token, ...], Hyperedge] = {}
+        self.cur_text: str | None = None
+        self.doc: Doc | None = None
+        self.beta: str = beta
 
-    def debug_msg(self, msg):
+    def debug_msg(self, msg: str) -> None:
         if self.debug:
             print(msg)
-    
-    def parse_sentence(self, sentence):
+
+    def parse_sentence(self, sentence: str) -> list[dict[str, object]]:
         # This runs spacy own sentensizer anyway...
 
         sentence = re.sub(r'\s+', ' ', sentence).strip()
 
         if self.nlp:
             self.reset(sentence)
-            parses = []
+            parses: list[dict[str, object]] = []
             try:
                 self.doc = self.nlp(sentence)
-                offset = 0
+                offset: int = 0
                 for sent in self.doc.sents:
-                    parse = self.parse_spacy_sentence(sent, offset=offset)
+                    parse: dict[str, object] | None = self.parse_spacy_sentence(sent, offset=offset)
                     if parse:
                         parses.append(parse)
                     offset += len(sent)
@@ -223,19 +227,22 @@ class AlphaBetaParser(Parser):
         else:
             raise RuntimeError("spaCy model failed to initialize.")
 
-    def parse_spacy_sentence(self, sent, atom_sequence=None, offset=0):
+    def parse_spacy_sentence(self, sent: Span, atom_sequence: list[Atom] | None = None,
+                             offset: int = 0) -> dict[str, object] | None:
         try:
             if atom_sequence is None:
                 atom_sequence = self._build_atom_sequence(sent)
 
             self._compute_depths_and_connections(sent.root)
 
-            edge = None
+            edge: Hyperedge | None = None
+            result: list[Hyperedge] | None
+            failed: bool
             result, failed = self._parse_atom_sequence(atom_sequence)
             if result and len(result) == 1:
                 edge = non_unique(result[0])
-                # break
 
+            atom2word: dict[Atom, tuple[str, int]] = {}
             if edge:
                 edge = self._apply_arg_roles(edge)
                 if self.beta == 'repair':
@@ -244,11 +251,12 @@ class AlphaBetaParser(Parser):
                     edge = self._normalize(edge)
                 if self.post_process:
                     edge = self._post_process(edge)
-                atom2word = self._generate_atom2word(edge, offset=offset)
-            
+                if edge is not None:
+                    atom2word = self._generate_atom2word(edge, offset=offset)
+
             if edge is None:
                 return None
-            
+
             return {
                 'edge': edge,
                 'failed': failed,
@@ -259,37 +267,38 @@ class AlphaBetaParser(Parser):
         except Exception as e:
             print('Caught exception: {} while parsing: "{}"'.format(str(e), str(sent)))
             traceback.print_exc()
+            return None
 
-    def manual_atom_sequence(self, sentence, token2atom):
+    def manual_atom_sequence(self, sentence: Span, token2atom: dict[Token, Atom]) -> list[Atom]:
         self.token2atom = {}
 
-        atomseq = []
+        atomseq: list[Atom] = []
         for token in sentence:
             if token in token2atom:
-                atom = token2atom[token]
+                atom: Atom | None = token2atom[token]
             else:
                 atom = None
             if atom:
-                uatom = UniqueAtom(atom)
+                uatom: Atom = UniqueAtom(atom)
                 self.dep_[uatom] = token
                 self.token2atom[token] = uatom
                 self.orig_atom[uatom] = uatom
                 atomseq.append(uatom)
         return atomseq
 
-    def reset(self, text):
-        self.dep_ = {}
+    def reset(self, text: str) -> None:
+        self.dep_: dict[Atom, Token] = {}
         self.temp_atoms = set()
         self.orig_atom = {}
         self.edge2toks = {}
         self.toks2edge = {}
-        self.edge2coref = {}
-        self.resolved_corefs = set()
+        self.edge2coref: dict[Hyperedge, object] = {}
+        self.resolved_corefs: set[object] = set()
         self.cur_text = text
 
-    def _builder_arg_roles(self, edge):
-        depth1 = self._dep_depth(edge[1])
-        depth2 = self._dep_depth(edge[2])
+    def _builder_arg_roles(self, edge: Hyperedge) -> str:
+        depth1: int = self._dep_depth(edge[1])
+        depth2: int = self._dep_depth(edge[2])
         if depth1 < depth2:
             return 'ma'
         elif depth1 > depth2:
@@ -298,11 +307,11 @@ class AlphaBetaParser(Parser):
             return 'mm'
 
 
-    def _relation_arg_role(self, edge):
-        head_token = self._head_token(edge)
+    def _relation_arg_role(self, edge: Hyperedge) -> str:
+        head_token: Token | None = self._head_token(edge)
         if not head_token:
             return '?'
-        dep = head_token.dep_
+        dep: str = head_token.dep_
 
         # subject
         if dep in {'nsubj', 'sb'}:
@@ -335,18 +344,20 @@ class AlphaBetaParser(Parser):
             return '?'
 
 
-    def _adjust_score(self, edges):
-        min_depth = 9999999
-        appos = False
-        min_appos_depth = 9999999
+    def _adjust_score(self, edges: list[Hyperedge]) -> int:
+        min_depth: int = 9999999
+        appos: bool = False
+        min_appos_depth: int = 9999999
 
         if all([edge.mtype() == 'C' for edge in edges]):
             for edge in edges:
-                token = self._head_token(edge)
-                depth = self.depths[self.token2atom[token]]
+                token: Token | None = self._head_token(edge)
+                if token is None:
+                    continue
+                depth: int = self.depths[self.token2atom[token]]
                 if depth < min_depth:
                     min_depth = depth
-                if token and token.dep_ == 'appos':
+                if token.dep_ == 'appos':
                     appos = True
                     if depth < min_appos_depth:
                         min_appos_depth = depth
@@ -356,15 +367,19 @@ class AlphaBetaParser(Parser):
         else:
             return 0
 
-    def _head_token(self, edge):
-        atoms = [unique(atom) for atom in edge.all_atoms() if unique(atom) in self.atom2token]
-        min_depth = 9999999
-        main_atom = None
+    def _head_token(self, edge: Hyperedge) -> Token | None:
+        atoms: list[Atom] = [
+            cast(Atom, uatom)
+            for atom in edge.all_atoms()
+            if (uatom := unique(atom)) is not None and uatom in self.atom2token
+        ]
+        min_depth: int = 9999999
+        main_atom: Atom | None = None
         for atom in atoms:
             if atom in self.orig_atom:
-                oatom = self.orig_atom[atom]
+                oatom: Atom = self.orig_atom[atom]
                 if oatom in self.depths:
-                    depth = self.depths[oatom]
+                    depth: int = self.depths[oatom]
                     if depth < min_depth:
                         min_depth = depth
                         main_atom = atom
@@ -372,25 +387,29 @@ class AlphaBetaParser(Parser):
             return self.atom2token[main_atom]
         else:
             return None
-        
-    def _dep_depth(self, edge):
-        atoms = [unique(atom) for atom in edge.all_atoms() if unique(atom) in self.atom2token]
-        mdepth = 99999999
+
+    def _dep_depth(self, edge: Hyperedge) -> int:
+        atoms: list[Atom] = [
+            cast(Atom, uatom)
+            for atom in edge.all_atoms()
+            if (uatom := unique(atom)) is not None and uatom in self.atom2token
+        ]
+        mdepth: int = 99999999
         for atom in atoms:
             if atom in self.orig_atom:
-                oatom = self.orig_atom[atom]
+                oatom: Atom = self.orig_atom[atom]
                 if oatom in self.depths:
-                    depth = self.depths[oatom]
+                    depth: int = self.depths[oatom]
                     if depth < mdepth:
                         mdepth = depth
         return mdepth
 
-    def _build_atom(self, token, ent_type, last_token):
-        text = token.text.lower()
-        et = ent_type
+    def _build_atom(self, token: Token, ent_type: str, last_token: Token | None) -> Atom:
+        text: str = token.text.lower()
+        et: str = ent_type
 
         if ent_type[0] == 'P':
-            atom = self._build_atom_predicate(token, ent_type, last_token)
+            atom: Atom = self._build_atom_predicate(token, ent_type, last_token)
         elif ent_type[0] == 'T':
             atom = self._build_atom_trigger(token, ent_type)
         elif ent_type[0] == 'M':
@@ -399,9 +418,9 @@ class AlphaBetaParser(Parser):
             atom = build_atom(text, et, self.lang)
         return atom
 
-    def _build_atom_predicate(self, token, ent_type, last_token):
-        text = token.text.lower()
-        et = ent_type
+    def _build_atom_predicate(self, token: Token, ent_type: str, last_token: Token | None) -> Atom:
+        text: str = token.text.lower()
+        et: str = ent_type
 
         # first naive assignment of predicate subtype
         # (can be revised at post-processing stage)
@@ -418,88 +437,95 @@ class AlphaBetaParser(Parser):
 
         return build_atom(text, ent_type, self.lang)
 
-    def _build_atom_trigger(self, token, ent_type):
-        text = token.text.lower()
-        et = 'Tv' if _is_verb(token) else ent_type
+    def _build_atom_trigger(self, token: Token, ent_type: str) -> Atom:
+        text: str = token.text.lower()
+        et: str = 'Tv' if _is_verb(token) else ent_type
         return build_atom(text, et, self.lang)
 
-    def _build_atom_modifier(self, token):
-        text = token.text.lower()
-        et = 'Mv' if _is_verb(token) else _modifier_type_and_subtype(token)
+    def _build_atom_modifier(self, token: Token) -> Atom:
+        text: str = token.text.lower()
+        et: str = 'Mv' if _is_verb(token) else _modifier_type_and_subtype(token)
         return build_atom(text, et, self.lang)
 
-    def _repair(self, edge):
+    def _repair(self, edge: Hyperedge) -> Hyperedge:
         if edge.not_atom:
-            edge = hedge([self._repair(subedge) for subedge in edge])
+            new_edge: Hyperedge | None = hedge([self._repair(subedge) for subedge in edge])
+            if new_edge is None:
+                return edge
+            edge = new_edge
 
-            if edge and len(edge) == 3 and str(edge[0])[:4] == '+/B.':
+            if len(edge) == 3 and str(edge[0])[:4] == '+/B.':
                 if len(edge[1]) == 2 and edge[1].cmt == 'J':
-                    return hedge([edge[1][0], edge[1][1], edge[2]])
+                    return cast(Hyperedge, hedge([edge[1][0], edge[1][1], edge[2]]))
                 elif len(edge[2]) == 2 and edge[2].cmt == 'J':
-                    return hedge([edge[2][0], edge[1], edge[2][1]])
+                    return cast(Hyperedge, hedge([edge[2][0], edge[1], edge[2][1]]))
 
         return edge
 
-    def _normalize(self, edge):
+    def _normalize(self, edge: Hyperedge) -> Hyperedge:
         if edge.not_atom:
-            edge = hedge([self._normalize(subedge) for subedge in edge])
+            new_edge: Hyperedge | None = hedge([self._normalize(subedge) for subedge in edge])
+            if new_edge is None:
+                return edge
+            edge = new_edge
 
             # Move modifier to internal connector if it is applied to
             # relations, specifiers or conjunctions
-            if edge and edge.cmt == 'M' and not edge[1].atom:
-                innner_conn = edge[1].cmt
+            if edge.cmt == 'M' and not edge[1].atom:
+                innner_conn: str | None = edge[1].cmt
                 if innner_conn in {'P', 'T', 'J'}:
-                    return hedge(((edge[0], edge[1][0]),) + edge[1][1:])
+                    return cast(Hyperedge, hedge(((edge[0], edge[1][0]),) + edge[1][1:]))
 
         return edge
 
-    def _update_atom(self, old, new):
-        uold = UniqueAtom(old)
-        unew = UniqueAtom(new)
+    def _update_atom(self, old: Atom, new: Atom) -> None:
+        uold: Atom = UniqueAtom(old)
+        unew: Atom = UniqueAtom(new)
         if uold in self.atom2token:
             self.atom2token[unew] = self.atom2token[uold]
             self.temp_atoms.add(uold)
         self.orig_atom[unew] = uold
 
-    def _replace_atom(self, edge, old, new):
+    def _replace_atom(self, edge: Hyperedge, old: Atom, new: Atom) -> Hyperedge:
         self._update_atom(old, new)
         return edge.replace_atom(old, new)
 
-    def _insert_edge_with_argrole(self, edge, arg, argrole, pos):
-        new_edge = edge.insert_edge_with_argrole(arg, argrole, pos)
-        old_pred = edge[0].inner_atom()
-        new_pred = new_edge[0].inner_atom()
+    def _insert_edge_with_argrole(self, edge: Hyperedge, arg: Hyperedge, argrole: str, pos: int) -> Hyperedge:
+        new_edge: Hyperedge = edge.insert_edge_with_argrole(arg, argrole, pos)
+        old_pred: Atom = edge[0].inner_atom()
+        new_pred: Atom = new_edge[0].inner_atom()
         self._update_atom(old_pred, new_pred)
         return new_edge
 
-    def _replace_argroles(self, edge, argroles):
-        new_edge = edge.replace_argroles(argroles)
-        old_pred = edge[0].inner_atom()
-        new_pred = new_edge[0].inner_atom()
+    def _replace_argroles(self, edge: Hyperedge, argroles: str) -> Hyperedge:
+        new_edge: Hyperedge = edge.replace_argroles(argroles)
+        old_pred: Atom = edge[0].inner_atom()
+        new_pred: Atom = new_edge[0].inner_atom()
         self._update_atom(old_pred, new_pred)
         return new_edge
 
-    def _apply_arg_roles(self, edge):
+    def _apply_arg_roles(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
 
-        new_entity = edge
+        new_entity: Hyperedge = edge
 
         # Extend predicate connectors with argument types
         if edge.connector_mtype() == 'P':
-            pred = edge.atom_with_type('P')
-            subparts = pred.parts()[1].split('.')
-            args = [self._relation_arg_role(param) for param in edge[1:]]
-            args_string = ''.join(args)
+            pred: Atom | None = edge.atom_with_type('P')
+            assert pred is not None
+            subparts: list[str] = pred.parts()[1].split('.')
+            args: list[str] = [self._relation_arg_role(param) for param in edge[1:]]
+            args_string: str = ''.join(args)
             # TODO: this is done to detect imperative, to refactor
-            pt = _predicate_post_type_and_subtype(edge, subparts, args_string)
+            pt: str = _predicate_post_type_and_subtype(edge, subparts, args_string)
             if len(subparts) > 2:
-                new_part = '{}.{}.{}'.format(pt, args_string, subparts[2])
+                new_part: str = '{}.{}.{}'.format(pt, args_string, subparts[2])
             else:
                 new_part = '{}.{}'.format(pt, args_string)
-            new_pred = pred.replace_atom_part(1, new_part)
-            unew_pred = UniqueAtom(new_pred)
-            upred = UniqueAtom(pred)
+            new_pred: Atom = pred.replace_atom_part(1, new_part)
+            unew_pred: Atom = UniqueAtom(new_pred)
+            upred: Atom = UniqueAtom(pred)
             self.atom2token[unew_pred] = self.atom2token[upred]
             self.temp_atoms.add(upred)
             self.orig_atom[unew_pred] = upred
@@ -507,41 +533,42 @@ class AlphaBetaParser(Parser):
 
         # Extend builder connectors with argument types
         elif edge.connector_mtype() == 'B':
-            builder = edge.atom_with_type('B')
+            builder: Atom | None = edge.atom_with_type('B')
+            assert builder is not None
             subparts = builder.parts()[1].split('.')
-            arg_roles = self._builder_arg_roles(edge)
+            arg_roles: str = self._builder_arg_roles(edge)
             if len(arg_roles) > 0:
                 if len(subparts) > 1:
                     subparts[1] = arg_roles
                 else:
                     subparts.append(arg_roles)
                 new_part = '.'.join(subparts)
-                new_builder = builder.replace_atom_part(1, new_part)
-                ubuilder = UniqueAtom(builder)
-                unew_builder = UniqueAtom(new_builder)
+                new_builder: Atom = builder.replace_atom_part(1, new_part)
+                ubuilder: Atom = UniqueAtom(builder)
+                unew_builder: Atom = UniqueAtom(new_builder)
                 if ubuilder in self.atom2token:
                     self.atom2token[unew_builder] = self.atom2token[ubuilder]
                     self.temp_atoms.add(ubuilder)
                 self.orig_atom[unew_builder] = ubuilder
                 new_entity = edge.replace_atom(builder, new_builder, unique=True)
 
-        new_args = [self._apply_arg_roles(subentity) for subentity in new_entity[1:]]
-        new_entity = hedge([new_entity[0]] + new_args)
+        new_args: list[Hyperedge] = [self._apply_arg_roles(subentity) for subentity in new_entity[1:]]
+        new_entity = cast(Hyperedge, hedge([new_entity[0]] + new_args))
 
         return new_entity
 
-    def _generate_atom2word(self, edge, offset=0):
-        atom2word = {}
-        atoms = edge.all_atoms()
+    def _generate_atom2word(self, edge: Hyperedge, offset: int = 0) -> dict[Atom, tuple[str, int]]:
+        atom2word: dict[Atom, tuple[str, int]] = {}
+        atoms: list[Atom] = edge.all_atoms()
         for atom in atoms:
-            uatom = UniqueAtom(atom)
+            uatom: Atom = UniqueAtom(atom)
             if uatom in self.atom2token:
-                token = self.atom2token[uatom]
-                word = (token.text, token.i - offset)
+                token: Token = self.atom2token[uatom]
+                word: tuple[str, int] = (token.text, token.i - offset)
                 atom2word[uatom] = word
         return atom2word
 
-    def _parse_token(self, token, atom_type):
+    def _parse_token(self, token: Token, atom_type: str) -> Atom | None:
         if atom_type == 'X':
             return None
         elif atom_type == 'C':
@@ -554,73 +581,73 @@ class AlphaBetaParser(Parser):
             atom_type = _predicate_type_and_subtype(token)
 
         # last token is useful to determine predicate subtype
-        tokens = list(token.lefts) + list(token.rights)
-        last_token = tokens[-1] if len(tokens) > 0 else None
+        tokens: list[Token] = list(token.lefts) + list(token.rights)
+        last_token: Token | None = tokens[-1] if len(tokens) > 0 else None
 
-        atom = self._build_atom(token, atom_type, last_token)
+        atom: Atom = self._build_atom(token, atom_type, last_token)
         self.debug_msg('ATOM: {}'.format(atom))
 
         return atom
 
-    def _build_atom_sequence(self, sentence):
-        features = []
+    def _build_atom_sequence(self, sentence: Span) -> list[Atom]:
+        features: list[tuple[str, str, str, str, str]] = []
         for pos, token in enumerate(sentence):
-            head = token.head
-            tag = token.tag_
-            dep = token.dep_
-            hpos = head.pos_ if head else ''
-            hdep = head.dep_ if head else ''
+            head: Token = token.head
+            tag: str = token.tag_
+            dep: str = token.dep_
+            hpos: str = head.pos_ if head else ''
+            hdep: str = head.dep_ if head else ''
             if pos + 1 < len(sentence):
-                pos_after = sentence[pos + 1].pos_
+                pos_after: str = sentence[pos + 1].pos_
             else:
                 pos_after = ''
             features.append((tag, dep, hpos, hdep, pos_after))
 
         assert self.alpha is not None, "Alpha classifier must be initialized before parsing"
-        atom_types = self.alpha.predict(sentence, features)
+        atom_types: tuple[str, ...] | list[str] = self.alpha.predict(sentence, features)
 
         self.token2atom = {}
 
-        atomseq = []
+        atomseq: list[Atom] = []
         for token, atom_type in zip(sentence, atom_types):
-            atom = self._parse_token(token, atom_type)
+            atom: Atom | None = self._parse_token(token, atom_type)
             if atom:
-                uatom = UniqueAtom(atom)
+                uatom: Atom = UniqueAtom(atom)
                 self.atom2token[uatom] = token
                 self.token2atom[token] = uatom
                 self.orig_atom[uatom] = uatom
                 atomseq.append(uatom)
         return atomseq
 
-    def _compute_depths_and_connections(self, root, depth=0):
+    def _compute_depths_and_connections(self, root: Token, depth: int = 0) -> None:
         if depth == 0:
             self.depths = {}
             self.connections = set()
 
         if root in self.token2atom:
-            parent_atom = self.token2atom[root]
+            parent_atom: Atom | None = self.token2atom[root]
             self.depths[parent_atom] = depth
         else:
             parent_atom = None
 
         for child in root.children:
             if parent_atom and child in self.token2atom:
-                child_atom = self.token2atom[child]
+                child_atom: Atom = self.token2atom[child]
                 self.connections.add((parent_atom, child_atom))
                 self.connections.add((child_atom, parent_atom))
             self._compute_depths_and_connections(child, depth + 1)
 
-    def _is_pair_connected(self, atoms1, atoms2):
+    def _is_pair_connected(self, atoms1: list[Atom], atoms2: list[Atom]) -> bool:
         for atom1 in atoms1:
             for atom2 in atoms2:
                 if atom1 in self.orig_atom and atom2 in self.orig_atom:
-                    pair = (self.orig_atom[atom1], self.orig_atom[atom2])
+                    pair: tuple[Atom, Atom] = (self.orig_atom[atom1], self.orig_atom[atom2])
                     if pair in self.connections:
                         return True
         return False
 
-    def _are_connected(self, atom_sets, connector_pos):
-        conn = True
+    def _are_connected(self, atom_sets: list[list[Atom]], connector_pos: int) -> bool:
+        conn: bool = True
         for pos, arg in enumerate(atom_sets):
             if pos != connector_pos:
                 if not self._is_pair_connected(atom_sets[connector_pos], arg):
@@ -628,38 +655,38 @@ class AlphaBetaParser(Parser):
                     break
         return conn
 
-    def _score(self, edges):
-        atom_sets = [edge.all_atoms() for edge in edges]
+    def _score(self, edges: list[Hyperedge]) -> int:
+        atom_sets: list[list[Atom]] = [edge.all_atoms() for edge in edges]
 
-        conn = False
+        conn: bool = False
         for pos in range(len(edges)):
             if self._are_connected(atom_sets, pos):
                 conn = True
                 break
 
-        mdepth = 99999999
+        mdepth: int = 99999999
         for atom_set in atom_sets:
             for atom in atom_set:
                 if atom in self.orig_atom:
-                    oatom = self.orig_atom[atom]
+                    oatom: Atom = self.orig_atom[atom]
                     if oatom in self.depths:
-                        depth = self.depths[oatom]
+                        depth: int = self.depths[oatom]
                         if depth < mdepth:
                             mdepth = depth
 
         return (10000000 if conn else 0) + (mdepth * 100) + self._adjust_score(edges)
 
-    def _parse_atom_sequence(self, atom_sequence):
-        sequence = atom_sequence
+    def _parse_atom_sequence(self, atom_sequence: list[Atom]) -> tuple[list[Hyperedge] | None, bool]:
+        sequence: list[Hyperedge] = list(atom_sequence)
         while True:
-            action = None
-            best_score = -999999999
+            action: tuple[Rule, int, Hyperedge, int, int] | None = None
+            best_score: int = -999999999
             for rule_number, rule in enumerate(self.rules):
-                window_start = rule.size - 1
+                window_start: int = rule.size - 1
                 for pos in range(window_start, len(sequence)):
-                    new_edge = apply_rule(rule, sequence, pos)
+                    new_edge: Hyperedge | None = apply_rule(rule, sequence, pos)
                     if new_edge:
-                        score = self._score(sequence[pos - window_start:pos + 1])
+                        score: int = self._score(sequence[pos - window_start:pos + 1])
                         score -= rule_number
                         if score > best_score:
                             action = (rule, score, new_edge, window_start, pos)
@@ -669,8 +696,8 @@ class AlphaBetaParser(Parser):
             if action is None:
                 # if all else fails...
                 if len(sequence) > 0:
-                    new_sequence = [hedge([':/J/.'] + sequence[:2])]
-                    new_sequence += sequence[2:]
+                    fallback: Hyperedge | None = hedge([':/J/.'] + sequence[:2])
+                    new_sequence: list[Hyperedge] = ([fallback] if fallback else []) + sequence[2:]
                 else:
                     return None, True
             else:
@@ -686,16 +713,18 @@ class AlphaBetaParser(Parser):
             if len(sequence) < 2:
                 return sequence, False
 
-    def sentensize(self, text):
+    def sentensize(self, text: str) -> list[str]:
         if self.nlp:
-            doc = self.nlp(text.strip())
+            doc: Doc = self.nlp(text.strip())
             return [str(sent).strip() for sent in doc.sents]
         else:
             raise RuntimeError("spaCy model failed to initialize.")
 
-    def _edge2toks(self, edge):
-        uatoms = [unique(atom) for atom in edge.all_atoms()]
-        toks = tuple(sorted([self.atom2token[uatom] for uatom in uatoms if uatom in self.atom2token]))
+    def _edge2toks(self, edge: Hyperedge) -> None:
+        uatoms: list[Hyperedge | None] = [unique(atom) for atom in edge.all_atoms()]
+        toks: tuple[Token, ...] = tuple(sorted(
+            [self.atom2token[uatom] for uatom in uatoms if uatom is not None and uatom in self.atom2token]
+        ))
         self.edge2toks[edge] = toks
         self.toks2edge[toks] = edge
         if edge.not_atom:
@@ -705,13 +734,13 @@ class AlphaBetaParser(Parser):
     # ===============
     # Post-processing
     # ===============
-    def _insert_arg_in_tail(self, edge, arg):
+    def _insert_arg_in_tail(self, edge: Hyperedge, arg: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
 
         if edge.cmt == 'P':
-            ars = edge.argroles()
-            ar = None
+            ars: str = edge.argroles()
+            ar: str | None = None
             if 'p' in ars:
                 if 'a' not in ars:
                     ar = 'a'
@@ -724,9 +753,9 @@ class AlphaBetaParser(Parser):
             if ar:
                 return self._insert_edge_with_argrole(edge, arg, ar, len(edge))
 
-        new_tail = self._insert_arg_in_tail(edge[-1], arg)
+        new_tail: Hyperedge = self._insert_arg_in_tail(edge[-1], arg)
         if new_tail != edge[-1]:
-            return hedge(list(edge[:-1]) + [new_tail])
+            return cast(Hyperedge, hedge(list(edge[:-1]) + [new_tail]))
         if edge.cmt != 'P':
             return edge
         ars = edge.argroles()
@@ -734,25 +763,28 @@ class AlphaBetaParser(Parser):
             return edge
         return self._insert_edge_with_argrole(edge, arg, 'x', len(edge))
 
-    def _insert_spec_rightmost_relation(self, edge, arg):
+    def _insert_spec_rightmost_relation(self, edge: Hyperedge, arg: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
         if 'P' in [atom.mt for atom in edge[-1].atoms()]:
-            return hedge(list(edge[:-1]) + [self._insert_spec_rightmost_relation(edge[-1], arg)])
+            return cast(Hyperedge, hedge(list(edge[:-1]) + [self._insert_spec_rightmost_relation(edge[-1], arg)]))
         if edge[0].mt == 'P':
             return self._insert_edge_with_argrole(edge, arg, 'x', len(edge))
         for pos, subedge in reversed(list(enumerate(edge))):
             if 'P' in [atom.mt for atom in subedge.atoms()]:
-                new_edge = list(edge)
-                new_edge[pos] = self._insert_spec_rightmost_relation(subedge, arg)
-                return hedge(new_edge)
+                new_edge_list: list[Hyperedge] = list(edge)
+                new_edge_list[pos] = self._insert_spec_rightmost_relation(subedge, arg)
+                return cast(Hyperedge, hedge(new_edge_list))
         return edge
 
-    def _process_colon_conjunctions(self, edge):
+    def _process_colon_conjunctions(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
-        edge = hedge([self._process_colon_conjunctions(subedge) for subedge in edge])
-        if edge and str(edge[0]) == ':/J/.' and any(subedge.mt == 'R' for subedge in edge):
+        new_edge: Hyperedge | None = hedge([self._process_colon_conjunctions(subedge) for subedge in edge])
+        if new_edge is None:
+            return edge
+        edge = new_edge
+        if str(edge[0]) == ':/J/.' and any(subedge.mt == 'R' for subedge in edge):
             if edge[1].mt == 'R':
                 # RR
                 if edge[2].mt == 'S':
@@ -764,7 +796,7 @@ class AlphaBetaParser(Parser):
             # CR
             elif edge[1].mt == 'C':
                 if edge[2].mt == 'R':
-                    if not 's' in edge[2].argroles():
+                    if 's' not in edge[2].argroles():
                         # concept is subject
                         return self._insert_edge_with_argrole(edge[2], edge[1], 's', 0)
             # SR
@@ -774,17 +806,18 @@ class AlphaBetaParser(Parser):
                     return self._insert_edge_with_argrole(edge[2], edge[1], 'x', len(edge[2]))
         return edge
 
-    def _fix_argroles(self, edge):
+    def _fix_argroles(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
-        edge = hedge([self._fix_argroles(subedge) for subedge in edge])
-        if edge is None:
+        new_edge: Hyperedge | None = hedge([self._fix_argroles(subedge) for subedge in edge])
+        if new_edge is None:
             return edge
-        ars = edge.argroles()
+        edge = new_edge
+        ars: str = edge.argroles()
         if ars != '' and edge.mt == 'R':
-            _ars = ''
+            _ars: str = ''
             for ar, subedge in zip(ars, edge[1:]):
-                _ar = ar
+                _ar: str = ar
                 if ar == '?':
                     if subedge.mt == 'R':
                         _ar = 'r'
@@ -794,9 +827,9 @@ class AlphaBetaParser(Parser):
             return self._replace_argroles(edge, _ars)
         return edge
 
-    def _post_process(self, edge):
+    def _post_process(self, edge: Hyperedge | None) -> Hyperedge | None:
         if edge is None:
             return None
-        _edge = self._fix_argroles(edge)
+        _edge: Hyperedge = self._fix_argroles(edge)
         _edge = self._process_colon_conjunctions(_edge)
         return _edge

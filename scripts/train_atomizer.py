@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+from numpy.typing import NDArray
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
@@ -10,8 +11,8 @@ from transformers import (
 )
 
 
-def tokenize_and_align_labels(examples):
-    """Tokenize each sample and align the original token labels 
+def tokenize_and_align_labels(examples: dict[str, list]) -> dict[str, list]:
+    """Tokenize each sample and align the original token labels
        to the new subword (tokenized) structure."""
 
     tokenized_outputs = tokenizer(
@@ -23,14 +24,14 @@ def tokenize_and_align_labels(examples):
         max_length=200                # adjust as needed
     )
 
-    labels_aligned = []
+    labels_aligned: list[list[int]] = []
     for i, labels in enumerate(examples["labels"]):
         # The tokenizer may split single words into multiple subwords.
         # We create a label list the same length as input_ids,
         # repeating the label for all subwords of the original token.
-        word_ids = tokenized_outputs.word_ids(batch_index=i)  
-        label_ids = []
-        previous_word_idx = None
+        word_ids: list[int | None] = tokenized_outputs.word_ids(batch_index=i)
+        label_ids: list[int] = []
+        previous_word_idx: int | None = None
 
         for word_idx in word_ids:
             if word_idx is None:
@@ -42,30 +43,32 @@ def tokenize_and_align_labels(examples):
 
         labels_aligned.append(label_ids)
 
-    # We don’t need offset_mapping during model training, so we remove it
+    # We don't need offset_mapping during model training, so we remove it
     tokenized_outputs["offset_mapping"] = [None for _ in examples["tokens"]]
-    
+
     tokenized_outputs["labels"] = labels_aligned
     return tokenized_outputs
 
 
-def compute_metrics(eval_pred):
-    """Compute accuracy at the token level (simple example). 
+def compute_metrics(eval_pred: tuple[NDArray, NDArray]) -> dict[str, float]:
+    """Compute accuracy at the token level (simple example).
        You can also compute F1, precision, recall, etc. by ignoring
        the -100 special tokens."""
+    logits: NDArray
+    labels: NDArray
     logits, labels = eval_pred
-    predictions = np.argmax(logits, axis=-1)
+    predictions: NDArray = np.argmax(logits, axis=-1)
 
     # Flatten ignoring -100
-    true_predictions = []
-    true_labels = []
+    true_predictions: list[int] = []
+    true_labels: list[int] = []
     for pred, lab in zip(predictions, labels):
         for p, l in zip(pred, lab):
             if l != -100:  # skip special tokens
                 true_predictions.append(p)
                 true_labels.append(l)
 
-    results = accuracy_metric.compute(
+    results: dict[str, float] = accuracy_metric.compute(
         references=true_labels,
         predictions=true_predictions
     )
@@ -74,24 +77,24 @@ def compute_metrics(eval_pred):
 
 if __name__ == '__main__':
     with open("sentences.jsonl", "rt") as f:
-        sentences = [json.loads(line) for line in f]
+        sentences: list[dict] = [json.loads(line) for line in f]
 
-    dataset_dict = {
+    dataset_dict: dict[str, list] = {
         "tokens": [sentence["words"] for sentence in sentences],
         "labels": [sentence["types"] for sentence in sentences]
     }
 
-    full_dataset = Dataset.from_dict(dataset_dict)
+    full_dataset: Dataset = Dataset.from_dict(dataset_dict)
 
-    max_words = max([len(sentence["words"]) for sentence in sentences])
+    max_words: int = max([len(sentence["words"]) for sentence in sentences])
 
 
-    labels = set()
+    labels: set[str] = set()
     for sentence in sentences:
         labels |= set(sentence["types"])
     print(labels)
-    label_to_id = {label: i for i, label in enumerate(labels)}
-    id_to_label = {i: label for label, i in label_to_id.items()}
+    label_to_id: dict[str, int] = {label: i for i, label in enumerate(labels)}
+    id_to_label: dict[int, str] = {i: label for label, i in label_to_id.items()}
 
     dataset = full_dataset.train_test_split(test_size=0.25, seed=42)
     train_dataset = dataset["train"]
@@ -101,14 +104,14 @@ if __name__ == '__main__':
     print("Num test samples: ", len(test_dataset))
 
 
-    model_checkpoint = "distilbert-base-multilingual-cased"
+    model_checkpoint: str = "distilbert-base-multilingual-cased"
     tokenizer = AutoTokenizer.from_pretrained(model_checkpoint, use_fast=True, add_prefix_space=True)
 
     # Apply to train/test datasets
     train_dataset = train_dataset.map(tokenize_and_align_labels, batched=True)
     test_dataset = test_dataset.map(tokenize_and_align_labels, batched=True)
 
-    # Remove columns we don’t feed directly to the model
+    # Remove columns we don't feed directly to the model
     # train_dataset = train_dataset.remove_columns(["tokens", "labels"])
     # test_dataset = test_dataset.remove_columns(["tokens", "labels"])
 
@@ -125,7 +128,7 @@ if __name__ == '__main__':
 
     accuracy_metric = evaluate.load("accuracy")  # type: ignore[attr-defined]
 
-    training_args = TrainingArguments(
+    training_args: TrainingArguments = TrainingArguments(
         output_dir="./test-roberta-token-classifier",
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -139,7 +142,7 @@ if __name__ == '__main__':
         report_to="none"  # Set to "tensorboard" if you want logs
     )
 
-    trainer = Trainer(
+    trainer: Trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -150,7 +153,7 @@ if __name__ == '__main__':
 
     trainer.train()
 
-    results = trainer.evaluate(test_dataset)  # type: ignore[arg-type]
+    results: dict[str, float] = trainer.evaluate(test_dataset)  # type: ignore[arg-type]
     print("Test set results:", results)
 
     trainer.save_model("./token-classifier")

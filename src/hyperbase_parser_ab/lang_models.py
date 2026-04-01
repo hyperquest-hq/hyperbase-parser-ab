@@ -1,4 +1,4 @@
-def get_spacy_models(lang):
+def get_spacy_models(lang: str) -> list[str]:
     if lang == 'de':
         return [
             'de_dep_news_trf',
