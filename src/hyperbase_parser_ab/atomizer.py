@@ -1,33 +1,18 @@
 from typing import List, Tuple
-from pathlib import Path
-import os
 
 import torch
 from transformers import AutoTokenizer, AutoModelForTokenClassification
 
 
+HF_REPO = "hyperquest/atom-classifier"
+
+
 class Atomizer:
     def __init__(self, model_path:str|None=None):
-        if model_path is None:
-            # Default to the token-classifier in the hyperparsers package directory
-            # Try multiple resolution strategies for different installation modes
-            pkg_dir = Path(__file__).resolve().parent.parent
-            model_path = pkg_dir / "models" / "atom-classifier"
-
-            # If not found (e.g., __file__ points to site-packages in some cases)
-            if not model_path.exists():
-                # Try to find the actual source directory via VIRTUAL_ENV
-                if 'VIRTUAL_ENV' in os.environ:
-                    venv_parent = Path(os.environ['VIRTUAL_ENV']).parent
-                    candidate = venv_parent / "hyperparsers" / "models" / "atom-classifier"
-                    if candidate.exists():
-                        model_path = candidate
-
-            model_path = str(model_path)
-
-        self.model_path = model_path
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, use_fast=True)
-        self.model = AutoModelForTokenClassification.from_pretrained(self.model_path)
+        model_id = model_path or HF_REPO
+        self.model_path = model_id
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+        self.model = AutoModelForTokenClassification.from_pretrained(model_id)
         self.id2label = self.model.config.id2label
 
     def atomize(self,
