@@ -10,6 +10,7 @@ dependencies = [
     "spacy>=3.8.0",
     "torch>=2.0.0",
     "transformers>=4.46.0",
+    "pip",  # so that spaCy models can be easily installed with uv
 ]
 
 [tool.uv.sources]
