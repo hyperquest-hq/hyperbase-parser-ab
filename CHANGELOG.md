@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1] - work in progress
+
+### Added
+
+### Changed
+
+### Removed
+
 ## [0.1.0] - 02-04-2026 - extracted from graphbrain
 
 ### Added
