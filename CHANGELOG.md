@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.1] - work in progress
+## [0.1.0] - 02-04-2026 - extracted from graphbrain
 
 ### Added
 
@@ -10,5 +10,3 @@
 ### Changed
 
 - Original alpha-beta parser from Graphbrain was extracted to create this plugin.
-
-### Removed
