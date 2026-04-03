@@ -26,7 +26,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
-    "hyperbase>=0.8.0",
+    "hyperbase>=0.9.0",
     "scikit-learn>=1.3.0",
     "spacy>=3.8.0",
     "torch>=2.0.0",

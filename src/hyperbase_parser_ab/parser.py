@@ -8,7 +8,7 @@ from spacy.tokens import Doc, Span, Token
 
 import hyperbase.constants as const
 from hyperbase.hyperedge import Atom, Hyperedge, build_atom, hedge, non_unique, unique, UniqueAtom
-from hyperbase.parsers import Parser
+from hyperbase.parsers import ParseResult, Parser
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import get_spacy_models
@@ -205,19 +205,19 @@ class AlphaBetaParser(Parser):
         if self.debug:
             print(msg)
 
-    def parse_sentence(self, sentence: str) -> list[dict[str, object]]:
+    def parse_sentence(self, sentence: str) -> list[ParseResult]:
         # This runs spacy own sentensizer anyway...
 
         sentence = re.sub(r'\s+', ' ', sentence).strip()
 
         if self.nlp:
             self.reset(sentence)
-            parses: list[dict[str, object]] = []
+            parses: list[ParseResult] = []
             try:
                 self.doc = self.nlp(sentence)
                 offset: int = 0
                 for sent in self.doc.sents:
-                    parse: dict[str, object] | None = self.parse_spacy_sentence(sent, offset=offset)
+                    parse: ParseResult | None = self.parse_spacy_sentence(sent, offset=offset)
                     if parse:
                         parses.append(parse)
                     offset += len(sent)
@@ -228,7 +228,7 @@ class AlphaBetaParser(Parser):
             raise RuntimeError("spaCy model failed to initialize.")
 
     def parse_spacy_sentence(self, sent: Span, atom_sequence: list[Atom] | None = None,
-                             offset: int = 0) -> dict[str, object] | None:
+                             offset: int = 0) -> ParseResult | None:
         try:
             if atom_sequence is None:
                 atom_sequence = self._build_atom_sequence(sent)
@@ -257,13 +257,14 @@ class AlphaBetaParser(Parser):
             if edge is None:
                 return None
 
-            return {
-                'edge': edge,
-                'failed': failed,
-                'text': str(sent).strip(),
-                'tokens': [str(token) for token in sent],
-                'tok_pos': _generate_tok_pos(atom2word, edge)
-            }
+            tok_pos_str = _generate_tok_pos(atom2word, edge)
+            return ParseResult(
+                edge=edge,
+                text=str(sent).strip(),
+                tokens=[str(token) for token in sent],
+                tok_pos=hedge(tok_pos_str),
+                failed=failed,
+            )
         except Exception as e:
             print('Caught exception: {} while parsing: "{}"'.format(str(e), str(sent)))
             traceback.print_exc()

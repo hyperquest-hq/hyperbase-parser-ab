@@ -1,10 +1,12 @@
 # Changelog
 
-## [0.1.1] - work in progress
+## [0.2.0] - work in progress
 
 ### Added
 
 ### Changed
+
+- Adopted new hyperbase API (0.9.0) with ParseResult.
 
 ### Removed
 
