@@ -1,14 +1,10 @@
 # Changelog
 
-## [0.2.0] - work in progress
-
-### Added
+## [0.2.0] - 05-04-2026
 
 ### Changed
 
 - Adopted new hyperbase API (0.9.0).
-
-### Removed
 
 ## [0.1.0] - 02-04-2026 - extracted from graphbrain
 
