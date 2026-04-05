@@ -6,7 +6,7 @@
 
 ### Changed
 
-- Adopted new hyperbase API (0.9.0) with ParseResult.
+- Adopted new hyperbase API (0.9.0).
 
 ### Removed
 

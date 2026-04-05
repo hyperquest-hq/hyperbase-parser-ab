@@ -487,12 +487,8 @@ class AlphaBetaParser(Parser):
             self.temp_atoms.add(uold)
         self.orig_atom[unew] = uold
 
-    def _replace_atom(self, edge: Hyperedge, old: Atom, new: Atom) -> Hyperedge:
-        self._update_atom(old, new)
-        return edge.replace_atom(old, new)
-
-    def _insert_edge_with_argrole(self, edge: Hyperedge, arg: Hyperedge, argrole: str, pos: int) -> Hyperedge:
-        new_edge: Hyperedge = edge.insert_edge_with_argrole(arg, argrole, pos)
+    def _add_argument(self, edge: Hyperedge, arg: Hyperedge, argrole: str, pos: int) -> Hyperedge:
+        new_edge: Hyperedge = edge.add_argument(arg, argrole, pos)
         old_pred: Atom = edge[0].inner_atom()
         new_pred: Atom = new_edge[0].inner_atom()
         self._update_atom(old_pred, new_pred)
@@ -752,7 +748,7 @@ class AlphaBetaParser(Parser):
             elif 'o' not in ars:
                 ar = 'o'
             if ar:
-                return self._insert_edge_with_argrole(edge, arg, ar, len(edge))
+                return self._add_argument(edge, arg, ar, len(edge))
 
         new_tail: Hyperedge = self._insert_arg_in_tail(edge[-1], arg)
         if new_tail != edge[-1]:
@@ -762,7 +758,7 @@ class AlphaBetaParser(Parser):
         ars = edge.argroles()
         if ars == '':
             return edge
-        return self._insert_edge_with_argrole(edge, arg, 'x', len(edge))
+        return self._add_argument(edge, arg, 'x', len(edge))
 
     def _insert_spec_rightmost_relation(self, edge: Hyperedge, arg: Hyperedge) -> Hyperedge:
         if edge.atom:
@@ -770,7 +766,7 @@ class AlphaBetaParser(Parser):
         if 'P' in [atom.mt for atom in edge[-1].atoms()]:
             return cast(Hyperedge, hedge(list(edge[:-1]) + [self._insert_spec_rightmost_relation(edge[-1], arg)]))
         if edge[0].mt == 'P':
-            return self._insert_edge_with_argrole(edge, arg, 'x', len(edge))
+            return self._add_argument(edge, arg, 'x', len(edge))
         for pos, subedge in reversed(list(enumerate(edge))):
             if 'P' in [atom.mt for atom in subedge.atoms()]:
                 new_edge_list: list[Hyperedge] = list(edge)
@@ -790,7 +786,7 @@ class AlphaBetaParser(Parser):
                 # RR
                 if edge[2].mt == 'S':
                     # second is specification
-                    return self._insert_edge_with_argrole(edge[1], edge[2], 'x', len(edge[1]))
+                    return self._add_argument(edge[1], edge[2], 'x', len(edge[1]))
                 # RC
                 elif edge[2].mt == 'C':
                     return self._insert_arg_in_tail(edge[1], edge[2])
@@ -799,12 +795,12 @@ class AlphaBetaParser(Parser):
                 if edge[2].mt == 'R':
                     if 's' not in edge[2].argroles():
                         # concept is subject
-                        return self._insert_edge_with_argrole(edge[2], edge[1], 's', 0)
+                        return self._add_argument(edge[2], edge[1], 's', 0)
             # SR
             elif edge[1].mt == 'S':
                 if edge[2].mt == 'R':
                     # first is specification
-                    return self._insert_edge_with_argrole(edge[2], edge[1], 'x', len(edge[2]))
+                    return self._add_argument(edge[2], edge[1], 'x', len(edge[2]))
         return edge
 
     def _fix_argroles(self, edge: Hyperedge) -> Hyperedge:
