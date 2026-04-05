@@ -46,7 +46,7 @@ def _make_parser(beta="repair"):
         patch("hyperbase_parser_ab.parser.Alpha"),
     ):
         parser = AlphaBetaParser(
-            "en", beta=beta, normalize=True, post_process=True, debug=False
+            "en", beta=beta, normalise=True, post_process=True, debug=False
         )
     return parser
 
@@ -55,7 +55,7 @@ class TestParserConfig:
     def test_default_config(self):
         parser = _make_parser()
         assert parser.lang == "en"
-        assert parser.normalize is True
+        assert parser.normalise is True
         assert parser.post_process is True
         assert parser.debug is False
         assert parser.beta == "repair"
@@ -69,28 +69,28 @@ class TestParserConfig:
         assert parser.rules is strict_rules
 
 
-class TestParserNormalize:
-    def test_normalize_modifier_on_predicate(self):
+class TestParsernormalise:
+    def test_normalise_modifier_on_predicate(self):
         """When a modifier wraps a predicate relation, move modifier to inner connector."""
         parser = _make_parser()
         # (M (P C C)) should become ((M P) C C)
         edge = hedge("(quickly/M (runs/Pd/en cat/Cc/en dog/Cc/en))")
-        result = parser._normalize(edge)
+        result = parser._normalise(edge)
         assert result
         # The modifier should be merged with the inner predicate connector
         assert result[0].not_atom  # connector should be (quickly/M runs/Pd/en)
         assert str(result[0][0]) == "quickly/M"
         assert str(result[0][1]) == "runs/Pd/en"
 
-    def test_normalize_atom_unchanged(self):
+    def test_normalise_atom_unchanged(self):
         parser = _make_parser()
         atom = hedge("cat/Cc/en")
-        assert parser._normalize(atom) == atom
+        assert parser._normalise(atom) == atom
 
-    def test_normalize_non_modifier_unchanged(self):
+    def test_normalise_non_modifier_unchanged(self):
         parser = _make_parser()
         edge = hedge("(runs/Pd/en cat/Cc/en dog/Cc/en)")
-        result = parser._normalize(edge)
+        result = parser._normalise(edge)
         assert result == edge
 
 

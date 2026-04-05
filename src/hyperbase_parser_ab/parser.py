@@ -169,7 +169,7 @@ class AlphaBetaParser(Parser):
         self,
         lang: str,
         beta: str = "repair",
-        normalize: bool = True,
+        normalise: bool = True,
         post_process: bool = True,
         debug: bool = False,
     ) -> None:
@@ -203,7 +203,7 @@ class AlphaBetaParser(Parser):
             self.rules = repair_rules
         else:
             raise RuntimeError(f"unkown beta stage: {beta}")
-        self.normalize: bool = normalize
+        self.normalise: bool = normalise
         self.post_process: bool = post_process
         self.debug: bool = debug
 
@@ -269,7 +269,7 @@ class AlphaBetaParser(Parser):
                 edge = self._apply_arg_roles(edge)
                 if self.beta == "repair":
                     edge = self._repair(edge)
-                if self.normalize:
+                if self.normalise:
                     edge = self._normalise(edge)
                 if self.post_process:
                     edge = self._post_process(edge)
