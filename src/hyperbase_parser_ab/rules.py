@@ -2,7 +2,13 @@ from hyperbase.hyperedge import Hyperedge, hedge
 
 
 class Rule:
-    def __init__(self, first_type: str, arg_types: set[str], size: int, connector: str | None = None) -> None:
+    def __init__(
+        self,
+        first_type: str,
+        arg_types: set[str],
+        size: int,
+        connector: str | None = None,
+    ) -> None:
         self.first_type: str = first_type
         self.arg_types: set[str] = arg_types
         self.size: int = size
@@ -11,30 +17,32 @@ class Rule:
 
 
 strict_rules: list[Rule] = [
-    Rule('C', {'C'}, 2, '+/B/.'),
-    Rule('M', {'C', 'R', 'M', 'S', 'T', 'P', 'B', 'J'}, 2),
-    Rule('B', {'C'}, 3),
-    Rule('T', {'C', 'R'}, 2),
-    Rule('P', {'C', 'R', 'S'}, 6),
-    Rule('P', {'C', 'R', 'S'}, 5),
-    Rule('P', {'C', 'R', 'S'}, 4),
-    Rule('P', {'C', 'R', 'S'}, 3),
-    Rule('P', {'C', 'R', 'S'}, 2),
-    Rule('J', {'C', 'R', 'M', 'S', 'T', 'P', 'B', 'J'}, 3)]
+    Rule("C", {"C"}, 2, "+/B/."),
+    Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
+    Rule("B", {"C"}, 3),
+    Rule("T", {"C", "R"}, 2),
+    Rule("P", {"C", "R", "S"}, 6),
+    Rule("P", {"C", "R", "S"}, 5),
+    Rule("P", {"C", "R", "S"}, 4),
+    Rule("P", {"C", "R", "S"}, 3),
+    Rule("P", {"C", "R", "S"}, 2),
+    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3),
+]
 
 
 repair_rules: list[Rule] = [
-    Rule('C', {'C'}, 2, '+/B/.'),
-    Rule('M', {'C', 'R', 'M', 'S', 'T', 'P', 'B', 'J'}, 2),
-    Rule('B', {'C', 'R'}, 3),
-    Rule('T', {'C', 'R'}, 2),
-    Rule('P', {'C', 'R', 'S'}, 6),
-    Rule('P', {'C', 'R', 'S'}, 5),
-    Rule('P', {'C', 'R', 'S'}, 4),
-    Rule('P', {'C', 'R', 'S'}, 3),
-    Rule('P', {'C', 'R', 'S'}, 2),
-    Rule('J', {'C', 'R', 'M', 'S', 'T', 'P', 'B', 'J'}, 3),
-    Rule('J', {'C', 'R', 'M', 'S', 'T', 'P', 'B', 'J'}, 2)]
+    Rule("C", {"C"}, 2, "+/B/."),
+    Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
+    Rule("B", {"C", "R"}, 3),
+    Rule("T", {"C", "R"}, 2),
+    Rule("P", {"C", "R", "S"}, 6),
+    Rule("P", {"C", "R", "S"}, 5),
+    Rule("P", {"C", "R", "S"}, 4),
+    Rule("P", {"C", "R", "S"}, 3),
+    Rule("P", {"C", "R", "S"}, 2),
+    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3),
+    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
+]
 
 
 def apply_rule(rule: Rule, sentence: list[Hyperedge], pos: int) -> Hyperedge | None:
@@ -61,7 +69,7 @@ def apply_rule(rule: Rule, sentence: list[Hyperedge], pos: int) -> Hyperedge | N
                     break
         if valid:
             if rule.connector:
-                return hedge([rule.connector] + args)
+                return hedge([rule.connector, *args])
             else:
-                return hedge([pivot] + args)
+                return hedge([pivot, *args])
     return None

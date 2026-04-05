@@ -1,8 +1,12 @@
 from collections import Counter
 
 import torch
-from transformers import AutoTokenizer, AutoModelForTokenClassification, PreTrainedTokenizerBase, PreTrainedModel
-
+from transformers import (
+    AutoModelForTokenClassification,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 HF_REPO: str = "hyperquest/atom-classifier"
 
@@ -11,21 +15,21 @@ class Atomizer:
     def __init__(self, model_path: str | None = None) -> None:
         model_id: str = model_path or HF_REPO
         self.model_path: str = model_id
-        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-        self.model: PreTrainedModel = AutoModelForTokenClassification.from_pretrained(model_id)
+        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+            model_id, use_fast=True
+        )
+        self.model: PreTrainedModel = AutoModelForTokenClassification.from_pretrained(
+            model_id
+        )
         assert self.model.config.id2label
         self.id2label: dict[int, str] = self.model.config.id2label
 
-    def atomize(self,
-                sentence: str,
-                tokens: list[str] | None = None
-               ) -> list[tuple[str, str]]:
+    def atomize(
+        self, sentence: str, tokens: list[str] | None = None
+    ) -> list[tuple[str, str]]:
         # Tokenize the raw sentence and request offsets
         encoded = self.tokenizer(
-            sentence,
-            return_tensors="pt",
-            truncation=True,
-            return_offsets_mapping=True
+            sentence, return_tensors="pt", truncation=True, return_offsets_mapping=True
         )
 
         offset_mapping = encoded.pop("offset_mapping")  # remove so model doesn't see it
@@ -39,7 +43,9 @@ class Atomizer:
 
         if tokens is not None:
             # Map provided tokens to model predictions based on character offsets
-            return self._map_tokens_to_predictions(sentence, tokens, word_ids, pred_ids, offset_mapping)
+            return self._map_tokens_to_predictions(
+                sentence, tokens, word_ids, pred_ids, offset_mapping
+            )
 
         predicted_labels: list[tuple[str, str]] = []
         current_word_id: int | None = None
@@ -79,13 +85,14 @@ class Atomizer:
 
         return predicted_labels
 
-    def _map_tokens_to_predictions(self,
-                                   sentence: str,
-                                   tokens: list[str],
-                                   word_ids: list[int | None],
-                                   pred_ids: list[int],
-                                   offset_mapping: list[list[int]]
-                                  ) -> list[tuple[str, str]]:
+    def _map_tokens_to_predictions(
+        self,
+        sentence: str,
+        tokens: list[str],
+        word_ids: list[int | None],
+        pred_ids: list[int],
+        offset_mapping: list[list[int]],
+    ) -> list[tuple[str, str]]:
         """
         Maps provided tokens to model predictions by finding character offsets
         and assigning the most appropriate label based on overlapping model tokens.
@@ -105,10 +112,10 @@ class Atomizer:
 
         # For each provided token, collect overlapping model predictions
         result: list[tuple[str, str]] = []
-        for token, positions in zip(tokens, token_positions):
+        for token, positions in zip(tokens, token_positions, strict=True):
             if positions is None:
                 # Token not found in sentence - assign default label
-                result.append((token, 'C'))
+                result.append((token, "C"))
                 continue
 
             token_start: int
@@ -133,10 +140,12 @@ class Atomizer:
             # Assign the most common label, or first label if tie
             if overlapping_labels:
                 # Use most common label
-                most_common_label: str = Counter(overlapping_labels).most_common(1)[0][0]
+                most_common_label: str = Counter(overlapping_labels).most_common(1)[0][
+                    0
+                ]
                 result.append((token, most_common_label))
             else:
                 # No overlap found - use default
-                result.append((token, 'C'))
+                result.append((token, "C"))
 
         return result
