@@ -4,12 +4,11 @@ from typing import Any, cast
 
 import hyperbase.constants as const
 import spacy
+from hyperbase.builders import build_atom, hedge
 from hyperbase.hyperedge import (
     Atom,
     Hyperedge,
     UniqueAtom,
-    build_atom,
-    hedge,
     non_unique,
     unique,
 )

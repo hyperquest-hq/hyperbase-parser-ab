@@ -1,4 +1,4 @@
-from hyperbase.hyperedge import hedge
+from hyperbase import hedge
 
 from hyperbase_parser_ab.rules import Rule, apply_rule, repair_rules, strict_rules
 

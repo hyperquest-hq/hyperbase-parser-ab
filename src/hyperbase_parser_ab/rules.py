@@ -1,4 +1,5 @@
-from hyperbase.hyperedge import Hyperedge, hedge
+from hyperbase import hedge
+from hyperbase.hyperedge import Hyperedge
 
 
 class Rule:

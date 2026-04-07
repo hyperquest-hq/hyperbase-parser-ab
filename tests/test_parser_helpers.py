@@ -2,7 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from hyperbase.hyperedge import UniqueAtom, hedge
+from hyperbase import hedge
+from hyperbase.hyperedge import UniqueAtom
 
 from hyperbase_parser_ab.parser import (
     _builder_type_and_subtype,

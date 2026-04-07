@@ -3,7 +3,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from hyperbase.hyperedge import UniqueAtom, hedge
+from hyperbase import hedge
+from hyperbase.hyperedge import UniqueAtom
 
 from hyperbase_parser_ab.parser import AlphaBetaParser
 

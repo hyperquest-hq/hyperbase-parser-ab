@@ -6,6 +6,8 @@
 
 ### Changed
 
+- Adopted new hyperbase API (0.10.0).
+
 ### Removed
 
 ## [0.2.0] - 05-04-2026
