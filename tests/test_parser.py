@@ -12,7 +12,7 @@ from hyperbase_parser_ab.parser import AlphaBetaParser
 class TestParserInitErrors:
     def test_unsupported_language_raises(self):
         with pytest.raises(RuntimeError, match="not recognized"):
-            AlphaBetaParser("xx")
+            AlphaBetaParser({"lang": "xx"})
 
     def test_unknown_beta_stage_raises(self):
         with (
@@ -22,9 +22,9 @@ class TestParserInitErrors:
             patch("spacy.util.is_package", return_value=True),
             patch("spacy.load", return_value=MagicMock()),
             patch("hyperbase_parser_ab.parser.Alpha"),
-            pytest.raises(RuntimeError, match="unkown beta stage"),
+            pytest.raises(RuntimeError, match="unknown beta stage"),
         ):
-            AlphaBetaParser("en", beta="invalid")
+            AlphaBetaParser({"lang": "en", "beta": "invalid"})
 
     def test_no_spacy_model_installed_raises(self):
         with (
@@ -35,7 +35,7 @@ class TestParserInitErrors:
             patch("hyperbase_parser_ab.parser.Alpha"),
             pytest.raises(RuntimeError, match="requires one of the following"),
         ):
-            AlphaBetaParser("en")
+            AlphaBetaParser({"lang": "en"})
 
 
 def _make_parser(beta="repair"):
@@ -47,7 +47,13 @@ def _make_parser(beta="repair"):
         patch("hyperbase_parser_ab.parser.Alpha"),
     ):
         parser = AlphaBetaParser(
-            "en", beta=beta, normalise=True, post_process=True, debug=False
+            {
+                "lang": "en",
+                "beta": beta,
+                "normalise": True,
+                "post_process": True,
+                "debug": False,
+            }
         )
     return parser
 

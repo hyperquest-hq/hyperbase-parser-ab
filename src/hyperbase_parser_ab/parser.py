@@ -164,22 +164,55 @@ def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -
 
 
 class AlphaBetaParser(Parser):
-    def __init__(
-        self,
-        lang: str,
-        beta: str = "repair",
-        normalise: bool = True,
-        post_process: bool = True,
-        debug: bool = False,
-    ) -> None:
-        super().__init__()
+    @classmethod
+    def accepted_params(cls) -> dict[str, dict[str, Any]]:
+        return {
+            "lang": {
+                "type": str,
+                "default": None,
+                "description": "Language code (e.g. 'de', 'en', 'fr').",
+                "required": True,
+            },
+            "beta": {
+                "type": str,
+                "default": "repair",
+                "description": "Beta stage rules: 'strict' or 'repair'.",
+                "required": False,
+            },
+            "normalise": {
+                "type": bool,
+                "default": True,
+                "description": "Enable normalization of parsed edges.",
+                "required": False,
+            },
+            "post_process": {
+                "type": bool,
+                "default": True,
+                "description": "Enable post-processing of edges.",
+                "required": False,
+            },
+            "debug": {
+                "type": bool,
+                "default": False,
+                "description": "Enable debug message output.",
+                "required": False,
+            },
+        }
 
-        self.lang: str = lang
+    def __init__(self, params: dict[str, Any] | None = None) -> None:
+        super().__init__(params)
 
-        if lang not in SPACY_MODELS:
-            raise RuntimeError(f"Language code '{lang}' is not recognized.")
+        self.lang: str = self.params["lang"]
 
-        models: list[str] = SPACY_MODELS[lang]
+        if self.lang not in SPACY_MODELS:
+            raise RuntimeError(f"Language code '{self.lang}' is not recognized.")
+
+        beta: str = self.params.get("beta", "repair")
+        normalise: bool = self.params.get("normalise", True)
+        post_process: bool = self.params.get("post_process", True)
+        debug: bool = self.params.get("debug", False)
+
+        models: list[str] = SPACY_MODELS[self.lang]
 
         self.nlp: Language | None = None
         for model in models:
@@ -190,8 +223,8 @@ class AlphaBetaParser(Parser):
         if self.nlp is None:
             models_list: str = ", ".join(models)
             raise RuntimeError(
-                f"Language '{lang}' requires one of the following language models:\n"
-                f"{models_list}."
+                f"Language '{self.lang}' requires one of the following "
+                f"language models:\n{models_list}."
             )
 
         self.alpha: Alpha = Alpha(use_atomizer=True)
@@ -201,7 +234,7 @@ class AlphaBetaParser(Parser):
         elif beta == "repair":
             self.rules = repair_rules
         else:
-            raise RuntimeError(f"unkown beta stage: {beta}")
+            raise RuntimeError(f"unknown beta stage: {beta}")
         self.normalise: bool = normalise
         self.post_process: bool = post_process
         self.debug: bool = debug
@@ -767,7 +800,7 @@ class AlphaBetaParser(Parser):
             if len(sequence) < 2:
                 return sequence, False
 
-    def sentensize(self, text: str) -> list[str]:
+    def get_sentences(self, text: str) -> list[str]:
         if self.nlp:
             doc: Doc = self.nlp(text.strip())
             return [str(sent).strip() for sent in doc.sents]
