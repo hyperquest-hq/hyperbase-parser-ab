@@ -946,9 +946,34 @@ class AlphaBetaParser(Parser):
             return self._replace_argroles(edge, _ars)
         return edge
 
+    def _flatten_conjunctions(self, edge: Hyperedge) -> Hyperedge:
+        if edge.atom:
+            return edge
+        new_edge: Hyperedge = hedge(
+            [self._flatten_conjunctions(subedge) for subedge in edge]
+        )
+        if new_edge is None:
+            return edge
+        edge = new_edge
+        if edge[0].mt != "J":
+            return edge
+        connector: Hyperedge = edge[0]
+        flattened: list[Hyperedge] = [connector]
+        changed: bool = False
+        for subedge in edge[1:]:
+            if subedge.not_atom and len(subedge) >= 2 and subedge[0] == connector:
+                flattened.extend(list(subedge[1:]))
+                changed = True
+            else:
+                flattened.append(subedge)
+        if changed:
+            return hedge(flattened)
+        return edge
+
     def _post_process(self, edge: Hyperedge | None) -> Hyperedge | None:
         if edge is None:
             return None
         _edge: Hyperedge = self._fix_argroles(edge)
         _edge = self._process_colon_conjunctions(_edge)
+        _edge = self._flatten_conjunctions(_edge)
         return _edge

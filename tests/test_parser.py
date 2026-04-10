@@ -251,6 +251,76 @@ class TestParserDebug:
         assert capsys.readouterr().out == ""
 
 
+class TestParserFlattenConjunctions:
+    def test_flatten_atom_unchanged(self):
+        parser = _make_parser()
+        atom = hedge("red/Ca/en")
+        assert parser._flatten_conjunctions(atom) == atom
+
+    def test_flatten_no_conjunction_unchanged(self):
+        parser = _make_parser()
+        edge = hedge("(runs/Pd/en cat/Cc/en dog/Cc/en)")
+        assert parser._flatten_conjunctions(edge) == edge
+
+    def test_flatten_simple_conjunction_unchanged(self):
+        """A flat conjunction with no nested conjunctions stays the same."""
+        parser = _make_parser()
+        edge = hedge("(,/J red/Ca/en green/Ca/en blue/Ca/en)")
+        assert parser._flatten_conjunctions(edge) == edge
+
+    def test_flatten_nested_same_connector(self):
+        """(,/J red (,/J green blue)) → (,/J red green blue)"""
+        parser = _make_parser()
+        edge = hedge("(,/J red/Ca/en (,/J green/Ca/en blue/Ca/en))")
+        expected = hedge("(,/J red/Ca/en green/Ca/en blue/Ca/en)")
+        assert parser._flatten_conjunctions(edge) == expected
+
+    def test_flatten_nested_different_connector_unchanged(self):
+        """Nested conjunction with a different connector should NOT be flattened."""
+        parser = _make_parser()
+        edge = hedge("(,/J red/Ca/en (and/J/en green/Ca/en blue/Ca/en))")
+        assert parser._flatten_conjunctions(edge) == edge
+
+    def test_flatten_recursive_bottom_up(self):
+        """Multiple levels of nesting should all collapse."""
+        parser = _make_parser()
+        edge = hedge("(,/J red/Ca/en (,/J green/Ca/en (,/J blue/Ca/en yellow/Ca/en)))")
+        expected = hedge("(,/J red/Ca/en green/Ca/en blue/Ca/en yellow/Ca/en)")
+        assert parser._flatten_conjunctions(edge) == expected
+
+    def test_flatten_multiple_nested_conjunctions(self):
+        """(,/J (,/J a b) (,/J c d)) → (,/J a b c d)"""
+        parser = _make_parser()
+        edge = hedge("(,/J (,/J a/Ca/en b/Ca/en) (,/J c/Ca/en d/Ca/en))")
+        expected = hedge("(,/J a/Ca/en b/Ca/en c/Ca/en d/Ca/en)")
+        assert parser._flatten_conjunctions(edge) == expected
+
+    def test_flatten_inside_outer_edge(self):
+        """A nested conjunction inside a non-conjunction outer edge is still
+        flattened bottom-up."""
+        parser = _make_parser()
+        edge = hedge(
+            "(runs/Pd/en cat/Cc/en (,/J red/Ca/en (,/J green/Ca/en blue/Ca/en)))"
+        )
+        expected = hedge(
+            "(runs/Pd/en cat/Cc/en (,/J red/Ca/en green/Ca/en blue/Ca/en))"
+        )
+        assert parser._flatten_conjunctions(edge) == expected
+
+    def test_flatten_mixed_connectors_partial(self):
+        """Only the matching nested conjunctions should be flattened."""
+        parser = _make_parser()
+        edge = hedge(
+            "(,/J red/Ca/en (,/J green/Ca/en blue/Ca/en)"
+            " (and/J/en yellow/Ca/en purple/Ca/en))"
+        )
+        expected = hedge(
+            "(,/J red/Ca/en green/Ca/en blue/Ca/en"
+            " (and/J/en yellow/Ca/en purple/Ca/en))"
+        )
+        assert parser._flatten_conjunctions(edge) == expected
+
+
 class TestParserReset:
     def test_reset_clears_state(self):
         parser = _make_parser()

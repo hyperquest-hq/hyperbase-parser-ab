@@ -4,7 +4,8 @@
 
 ### Added
 
-- maximum depth protection
+- maximum depth protection.
+- conjunction flattening.
 
 ### Changed
 
