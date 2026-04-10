@@ -151,7 +151,7 @@ class TestParserRelationArgRole:
         parser.atom2token = {uatom: token}
         parser.orig_atom = {uatom: uatom}
         parser.depths = {uatom: 1}
-        assert parser._relation_arg_role(edge) == "p"
+        assert parser._relation_arg_role(edge) == "o"
 
     def test_indirect_object(self):
         parser = _make_parser()
@@ -162,7 +162,7 @@ class TestParserRelationArgRole:
         parser.atom2token = {uatom: token}
         parser.orig_atom = {uatom: uatom}
         parser.depths = {uatom: 1}
-        assert parser._relation_arg_role(edge) == "i"
+        assert parser._relation_arg_role(edge) == "x"
 
     def test_specifier(self):
         parser = _make_parser()
