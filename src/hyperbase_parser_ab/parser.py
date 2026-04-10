@@ -384,12 +384,12 @@ class AlphaBetaParser(Parser):
         # subject
         if dep in {"nsubj", "sb"}:
             return "s"
-        # passive subject
+        # passive subject (becomes object)
         elif dep in {"nsubjpass", "nsubj:pass"}:
-            return "p"
-        # agent
+            return "o"
+        # agent (becomes subject)
         elif dep == "agent":
-            return "a"
+            return "s"
         # object
         elif dep in {
             "obj",
@@ -405,17 +405,18 @@ class AlphaBetaParser(Parser):
         }:
             return "o"
         # indirect object
-        elif dep in {"iobj", "dative", "obl:arg", "da"}:
-            return "i"
-        # specifier
-        elif dep in {"advcl", "prep", "npadvmod", "advmod", "mo", "mnr"}:
+        elif dep in {"iobj", "dative", "obl:arg", "da"} or dep in {
+            "advcl",
+            "prep",
+            "npadvmod",
+            "advmod",
+            "mo",
+            "mnr",
+        }:
             return "x"
         # parataxis
-        elif dep in {"parataxis", "par"}:
-            return "t"
-        # interjection
-        elif dep in {"intj", "ng", "dm"}:
-            return "j"
+        elif dep in {"parataxis", "par"} or dep in {"intj", "ng", "dm"}:
+            return "?"
         # clausal complement
         elif dep in {"xcomp", "ccomp", "oc"}:
             return "r"
@@ -522,7 +523,15 @@ class AlphaBetaParser(Parser):
 
     def _build_atom_trigger(self, token: Token, ent_type: str) -> Atom:
         text: str = token.text.lower()
-        et: str = "Tv" if _is_verb(token) else ent_type
+
+        # indirect object
+        if token.dep_ in {"iobj", "dative", "obl:arg", "da"}:
+            et = "Ti"
+        elif _is_verb(token):
+            et = "Tv"
+        else:
+            et = ent_type
+
         return build_atom(text, et, self.lang)
 
     def _build_atom_modifier(self, token: Token) -> Atom:
