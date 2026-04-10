@@ -4,12 +4,14 @@
 
 ### Added
 
-- maximum depth protection.
-- conjunction flattening.
+- Maximum depth protection.
+- Conjunction flattening.
+- Show dependency parse tree on REPL.
 
 ### Changed
 
 - Adopted new hyperbase API (0.10.0).
+- Adopted REPL API.
 
 ### Removed
 

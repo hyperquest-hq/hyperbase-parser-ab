@@ -258,6 +258,11 @@ class AlphaBetaParser(Parser):
         if self.debug:
             print(msg)
 
+    def install_repl(self, session: object) -> None:
+        from hyperbase_parser_ab.repl import install
+
+        install(self, session)
+
     def parse_sentence(self, sentence: str) -> list[ParseResult]:
         # This runs spacy own sentensizer anyway...
 
