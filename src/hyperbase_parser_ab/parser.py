@@ -13,6 +13,7 @@ from hyperbase.hyperedge import (
     unique,
 )
 from hyperbase.parsers import Parser, ParseResult
+from hyperbase.parsers.utils import edge_depth_exceeds
 from spacy.language import Language
 from spacy.tokens import Doc, Span, Token
 
@@ -167,6 +168,7 @@ class AlphaBetaParser(Parser):
     @classmethod
     def accepted_params(cls) -> dict[str, dict[str, Any]]:
         return {
+            **super().accepted_params(),
             "lang": {
                 "type": str,
                 "default": None,
@@ -295,6 +297,16 @@ class AlphaBetaParser(Parser):
             result, failed = self._parse_atom_sequence(atom_sequence)
             if result and len(result) == 1:
                 edge = non_unique(result[0])
+
+            # Reject pathologically deep parses before they reach the
+            # recursive transforms below (which would otherwise blow the
+            # Python stack on inputs with extreme nesting).
+            if edge is not None and edge_depth_exceeds(edge, self.max_depth):
+                self.debug_msg(
+                    f"Rejecting parse: edge depth exceeds max_depth="
+                    f"{self.max_depth} for sentence: {sent!s}"
+                )
+                return None
 
             atom2word: dict[Atom, tuple[str, int]] = {}
             if edge:

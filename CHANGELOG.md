@@ -4,6 +4,8 @@
 
 ### Added
 
+- maximum depth protection
+
 ### Changed
 
 - Adopted new hyperbase API (0.10.0).
