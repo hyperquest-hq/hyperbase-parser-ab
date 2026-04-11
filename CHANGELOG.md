@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.1] - work in progress
+## [0.3.0] - 11-04-2026
 
 ### Added
 
@@ -13,8 +13,6 @@
 
 - Adopted new hyperbase API (0.10.0).
 - Adopted REPL API.
-
-### Removed
 
 ## [0.2.0] - 05-04-2026
 
