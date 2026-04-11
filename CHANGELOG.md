@@ -7,6 +7,7 @@
 - Maximum depth protection.
 - Conjunction flattening.
 - Show dependency parse tree on REPL.
+- lang_namespace parameter, defaults to False (no language namespaces in atoms).
 
 ### Changed
 

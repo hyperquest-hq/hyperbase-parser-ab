@@ -199,6 +199,15 @@ class AlphaBetaParser(Parser):
                 "description": "Enable debug message output.",
                 "required": False,
             },
+            "lang_namespace": {
+                "type": bool,
+                "default": False,
+                "description": (
+                    "Include the language code as a namespace in atoms "
+                    "(e.g. 'apple/Cc/en' instead of 'apple/Cc')."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -213,6 +222,8 @@ class AlphaBetaParser(Parser):
         normalise: bool = self.params.get("normalise", True)
         post_process: bool = self.params.get("post_process", True)
         debug: bool = self.params.get("debug", False)
+        lang_namespace: bool = self.params.get("lang_namespace", False)
+        self.atom_lang: str = self.lang if lang_namespace else ""
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -501,7 +512,7 @@ class AlphaBetaParser(Parser):
         elif ent_type[0] == "M":
             atom = self._build_atom_modifier(token)
         else:
-            atom = build_atom(text, et, self.lang)
+            atom = build_atom(text, et, self.atom_lang)
         return atom
 
     def _build_atom_predicate(
@@ -524,7 +535,7 @@ class AlphaBetaParser(Parser):
             else:
                 ent_type = "Pd"
 
-        return build_atom(text, ent_type, self.lang)
+        return build_atom(text, ent_type, self.atom_lang)
 
     def _build_atom_trigger(self, token: Token, ent_type: str) -> Atom:
         text: str = token.text.lower()
@@ -537,12 +548,12 @@ class AlphaBetaParser(Parser):
         else:
             et = ent_type
 
-        return build_atom(text, et, self.lang)
+        return build_atom(text, et, self.atom_lang)
 
     def _build_atom_modifier(self, token: Token) -> Atom:
         text: str = token.text.lower()
         et: str = "Mv" if _is_verb(token) else _modifier_type_and_subtype(token)
-        return build_atom(text, et, self.lang)
+        return build_atom(text, et, self.atom_lang)
 
     def _repair(self, edge: Hyperedge) -> Hyperedge:
         if edge.not_atom:
