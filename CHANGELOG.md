@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1] - work in progress
+
+### Added
+
+### Changed
+
+### Removed
+
 ## [0.3.0] - 11-04-2026
 
 ### Added
