@@ -311,8 +311,8 @@ class AlphaBetaParser(Parser):
                 self.debug_msg(f"After applying argument roles: {edge!s}")
                 edge = self._repair(edge)
                 self.debug_msg(f"After repair: {edge!s}")
-                edge = self._normalise(edge)
-                self.debug_msg(f"After normalisation: {edge!s}")
+                edge = self._normalise_modifiers(edge)
+                self.debug_msg(f"After modifier normalisation: {edge!s}")
                 edge = self._post_process(edge)
                 self.debug_msg(f"After post-processing: {edge!s}")
                 if edge is not None:
@@ -552,10 +552,10 @@ class AlphaBetaParser(Parser):
 
         return edge
 
-    def _normalise(self, edge: Hyperedge) -> Hyperedge:
+    def _normalise_modifiers(self, edge: Hyperedge) -> Hyperedge:
         if edge.not_atom:
             new_edge: Hyperedge | None = hedge(
-                [self._normalise(subedge) for subedge in edge]
+                [self._normalise_modifiers(subedge) for subedge in edge]
             )
             if new_edge is None:
                 return edge

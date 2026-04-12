@@ -53,28 +53,28 @@ class TestParserConfig:
         assert parser.debug is False
 
 
-class TestParsernormalise:
+class TestParserNormaliseModifiers:
     def test_normalise_modifier_on_predicate(self):
         """When a modifier wraps a predicate relation, move modifier to inner connector."""
         parser = _make_parser()
         # (M (P C C)) should become ((M P) C C)
-        edge = hedge("(quickly/M (runs/Pd/en cat/Cc/en dog/Cc/en))")
-        result = parser._normalise(edge)
+        edge = hedge("(quickly/M (runs/Pd.so/en cat/Cc/en dog/Cc/en))")
+        result = parser._normalise_modifiers(edge)
         assert result
         # The modifier should be merged with the inner predicate connector
         assert result[0].not_atom  # connector should be (quickly/M runs/Pd/en)
         assert str(result[0][0]) == "quickly/M"
-        assert str(result[0][1]) == "runs/Pd/en"
+        assert str(result[0][1]) == "runs/Pd.so/en"
 
     def test_normalise_atom_unchanged(self):
         parser = _make_parser()
         atom = hedge("cat/Cc/en")
-        assert parser._normalise(atom) == atom
+        assert parser._normalise_modifiers(atom) == atom
 
     def test_normalise_non_modifier_unchanged(self):
         parser = _make_parser()
-        edge = hedge("(runs/Pd/en cat/Cc/en dog/Cc/en)")
-        result = parser._normalise(edge)
+        edge = hedge("(runs/Pd.so/en cat/Cc/en dog/Cc/en)")
+        result = parser._normalise_modifiers(edge)
         assert result == edge
 
 
