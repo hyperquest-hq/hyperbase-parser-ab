@@ -14,18 +14,6 @@ class TestParserInitErrors:
         with pytest.raises(RuntimeError, match="not recognized"):
             AlphaBetaParser({"lang": "xx"})
 
-    def test_unknown_beta_stage_raises(self):
-        with (
-            patch(
-                "hyperbase_parser_ab.parser.SPACY_MODELS", {"en": ["en_core_web_sm"]}
-            ),
-            patch("spacy.util.is_package", return_value=True),
-            patch("spacy.load", return_value=MagicMock()),
-            patch("hyperbase_parser_ab.parser.Alpha"),
-            pytest.raises(RuntimeError, match="unknown beta stage"),
-        ):
-            AlphaBetaParser({"lang": "en", "beta": "invalid"})
-
     def test_no_spacy_model_installed_raises(self):
         with (
             patch(
@@ -65,15 +53,6 @@ class TestParserConfig:
         assert parser.normalise is True
         assert parser.post_process is True
         assert parser.debug is False
-        assert parser.beta == "repair"
-
-    def test_strict_mode(self):
-        parser = _make_parser(beta="strict")
-        assert parser.beta == "strict"
-        # strict rules are different from repair rules
-        from hyperbase_parser_ab.rules import strict_rules
-
-        assert parser.rules is strict_rules
 
 
 class TestParsernormalise:

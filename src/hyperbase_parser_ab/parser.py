@@ -19,7 +19,7 @@ from spacy.tokens import Doc, Span, Token
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import SPACY_MODELS
-from hyperbase_parser_ab.rules import Rule, apply_rule, repair_rules, strict_rules
+from hyperbase_parser_ab.rules import RULES, Rule, apply_rule
 
 
 def _edge2txt_parts(
@@ -185,12 +185,6 @@ class AlphaBetaParser(Parser):
                 "description": "Language code (e.g. 'de', 'en', 'fr').",
                 "required": True,
             },
-            "beta": {
-                "type": str,
-                "default": "repair",
-                "description": "Beta stage rules: 'strict' or 'repair'.",
-                "required": False,
-            },
             "normalise": {
                 "type": bool,
                 "default": True,
@@ -228,7 +222,6 @@ class AlphaBetaParser(Parser):
         if self.lang not in SPACY_MODELS:
             raise RuntimeError(f"Language code '{self.lang}' is not recognized.")
 
-        beta: str = self.params.get("beta", "repair")
         normalise: bool = self.params.get("normalise", True)
         post_process: bool = self.params.get("post_process", True)
         debug: bool = self.params.get("debug", False)
@@ -252,12 +245,6 @@ class AlphaBetaParser(Parser):
 
         self.alpha: Alpha = Alpha(use_atomizer=True)
 
-        if beta == "strict":
-            self.rules: list[Rule] = strict_rules
-        elif beta == "repair":
-            self.rules = repair_rules
-        else:
-            raise RuntimeError(f"unknown beta stage: {beta}")
         self.normalise: bool = normalise
         self.post_process: bool = post_process
         self.debug: bool = debug
@@ -273,7 +260,6 @@ class AlphaBetaParser(Parser):
         self.toks2edge: dict[tuple[Token, ...], Hyperedge] = {}
         self.cur_text: str | None = None
         self.doc: Doc | None = None
-        self.beta: str = beta
 
     def debug_msg(self, msg: str) -> None:
         if self.debug:
@@ -339,9 +325,8 @@ class AlphaBetaParser(Parser):
             if edge:
                 edge = self._apply_arg_roles(edge)
                 self.debug_msg(f"After applying argument roles: {edge!s}")
-                if self.beta == "repair":
-                    edge = self._repair(edge)
-                    self.debug_msg(f"After repair: {edge!s}")
+                edge = self._repair(edge)
+                self.debug_msg(f"After repair: {edge!s}")
                 if self.normalise:
                     edge = self._normalise(edge)
                     self.debug_msg(f"After normalisation: {edge!s}")
@@ -816,7 +801,7 @@ class AlphaBetaParser(Parser):
         while True:
             action: tuple[Rule, int, Hyperedge, int, int] | None = None
             best_score: int = -999999999
-            for rule_number, rule in enumerate(self.rules):
+            for rule_number, rule in enumerate(RULES):
                 window_start: int = rule.size - 1
                 for pos in range(window_start, len(sequence)):
                     new_edge: Hyperedge | None = apply_rule(rule, sequence, pos)

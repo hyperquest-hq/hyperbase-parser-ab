@@ -10,6 +10,9 @@
 
 ### Removed
 
+- Strict rules.
+- `beta` parameter.
+
 ## [0.3.0] - 11-04-2026
 
 ### Added

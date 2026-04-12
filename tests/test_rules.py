@@ -1,6 +1,6 @@
 from hyperbase import hedge
 
-from hyperbase_parser_ab.rules import Rule, apply_rule, repair_rules, strict_rules
+from hyperbase_parser_ab.rules import Rule, apply_rule
 
 
 class TestRule:
@@ -14,16 +14,6 @@ class TestRule:
     def test_rule_with_connector(self):
         rule = Rule("C", {"C"}, 2, "+/B/.")
         assert rule.connector == "+/B/."
-
-    def test_repair_builder_accepts_relations(self):
-        """Repair builder rule should accept R in addition to C."""
-        repair_b_rules = [r for r in repair_rules if r.first_type == "B"]
-        assert "R" in repair_b_rules[0].arg_types
-
-    def test_strict_builder_only_concepts(self):
-        """Strict builder rule should only accept C."""
-        strict_b_rules = [r for r in strict_rules if r.first_type == "B"]
-        assert strict_b_rules[0].arg_types == {"C"}
 
 
 class TestApplyRule:

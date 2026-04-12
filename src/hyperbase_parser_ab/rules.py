@@ -17,21 +17,7 @@ class Rule:
         self._branches: int = 0
 
 
-strict_rules: list[Rule] = [
-    Rule("C", {"C"}, 2, "+/B/."),
-    Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
-    Rule("B", {"C"}, 3),
-    Rule("T", {"C", "R"}, 2),
-    Rule("P", {"C", "R", "S"}, 6),
-    Rule("P", {"C", "R", "S"}, 5),
-    Rule("P", {"C", "R", "S"}, 4),
-    Rule("P", {"C", "R", "S"}, 3),
-    Rule("P", {"C", "R", "S"}, 2),
-    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3),
-]
-
-
-repair_rules: list[Rule] = [
+RULES: list[Rule] = [
     Rule("C", {"C"}, 2, "+/B/."),
     Rule("C", {"R"}, 2, ":/J/."),
     Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
