@@ -4,6 +4,8 @@
 
 ### Added
 
+- Atom classifier fixed cases.
+
 ### Changed
 
 ### Removed

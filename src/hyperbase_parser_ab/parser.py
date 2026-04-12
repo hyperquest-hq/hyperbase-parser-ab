@@ -61,6 +61,16 @@ def _edge2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
     return "".join(txt_parts)
 
 
+# fix known cases where classifier fails
+def _fix_atom_type(atom_type: str, token: Token) -> str:
+    tag: str = token.tag_
+    dep: str = token.dep_
+    if tag == "ADP" and dep == "case":
+        return "B"
+    else:
+        return atom_type
+
+
 def _concept_type_and_subtype(token: Token) -> str:
     pos: str = token.pos_
     dep: str = token.dep_
@@ -313,6 +323,7 @@ class AlphaBetaParser(Parser):
             result, failed = self._parse_atom_sequence(atom_sequence)
             if result and len(result) == 1:
                 edge = non_unique(result[0])
+                self.debug_msg(f"Initial parse: {edge!s}")
 
             # Reject pathologically deep parses before they reach the
             # recursive transforms below (which would otherwise blow the
@@ -327,12 +338,16 @@ class AlphaBetaParser(Parser):
             atom2word: dict[Atom, tuple[str, int]] = {}
             if edge:
                 edge = self._apply_arg_roles(edge)
+                self.debug_msg(f"After applying argument roles: {edge!s}")
                 if self.beta == "repair":
                     edge = self._repair(edge)
+                    self.debug_msg(f"After repair: {edge!s}")
                 if self.normalise:
                     edge = self._normalise(edge)
+                    self.debug_msg(f"After normalisation: {edge!s}")
                 if self.post_process:
                     edge = self._post_process(edge)
+                    self.debug_msg(f"After post-processing: {edge!s}")
                 if edge is not None:
                     atom2word = self._generate_atom2word(edge, offset=offset)
 
@@ -583,7 +598,7 @@ class AlphaBetaParser(Parser):
             # relations, specifiers or conjunctions
             if edge.cmt == "M" and not edge[1].atom:
                 innner_conn: str | None = edge[1].cmt
-                if innner_conn in {"P", "T", "J"}:
+                if innner_conn in {"P", "T"}:
                     return hedge(((edge[0], edge[1][0]), *edge[1][1:]))
 
         return edge
@@ -681,6 +696,7 @@ class AlphaBetaParser(Parser):
         return atom2word
 
     def _parse_token(self, token: Token, atom_type: str) -> Atom | None:
+        atom_type = _fix_atom_type(atom_type, token)
         if atom_type == "X":
             return None
         elif atom_type == "C":
@@ -729,6 +745,7 @@ class AlphaBetaParser(Parser):
                 self.token2atom[token] = uatom
                 self.orig_atom[uatom] = uatom
                 atomseq.append(uatom)
+        self.debug_msg(f"Atom sequence: {atomseq}")
         return atomseq
 
     def _compute_depths_and_connections(self, root: Token, depth: int = 0) -> None:

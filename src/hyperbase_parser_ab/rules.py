@@ -33,6 +33,7 @@ strict_rules: list[Rule] = [
 
 repair_rules: list[Rule] = [
     Rule("C", {"C"}, 2, "+/B/."),
+    Rule("C", {"R"}, 2, ":/J/."),
     Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
     Rule("B", {"C", "R"}, 3),
     Rule("T", {"C", "R"}, 2),

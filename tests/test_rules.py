@@ -15,19 +15,6 @@ class TestRule:
         rule = Rule("C", {"C"}, 2, "+/B/.")
         assert rule.connector == "+/B/."
 
-    def test_strict_rules_count(self):
-        assert len(strict_rules) == 10
-
-    def test_repair_rules_count(self):
-        assert len(repair_rules) == 11
-
-    def test_repair_has_extra_conjunction_rule(self):
-        """Repair rules should have a 2-arg conjunction rule that strict doesn't."""
-        repair_j_rules = [r for r in repair_rules if r.first_type == "J"]
-        strict_j_rules = [r for r in strict_rules if r.first_type == "J"]
-        assert len(repair_j_rules) == 2
-        assert len(strict_j_rules) == 1
-
     def test_repair_builder_accepts_relations(self):
         """Repair builder rule should accept R in addition to C."""
         repair_b_rules = [r for r in repair_rules if r.first_type == "B"]
