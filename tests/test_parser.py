@@ -50,8 +50,6 @@ class TestParserConfig:
     def test_default_config(self):
         parser = _make_parser()
         assert parser.lang == "en"
-        assert parser.normalise is True
-        assert parser.post_process is True
         assert parser.debug is False
 
 

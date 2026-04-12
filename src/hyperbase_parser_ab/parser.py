@@ -185,18 +185,6 @@ class AlphaBetaParser(Parser):
                 "description": "Language code (e.g. 'de', 'en', 'fr').",
                 "required": True,
             },
-            "normalise": {
-                "type": bool,
-                "default": True,
-                "description": "Enable normalization of parsed edges.",
-                "required": False,
-            },
-            "post_process": {
-                "type": bool,
-                "default": True,
-                "description": "Enable post-processing of edges.",
-                "required": False,
-            },
             "debug": {
                 "type": bool,
                 "default": False,
@@ -222,8 +210,6 @@ class AlphaBetaParser(Parser):
         if self.lang not in SPACY_MODELS:
             raise RuntimeError(f"Language code '{self.lang}' is not recognized.")
 
-        normalise: bool = self.params.get("normalise", True)
-        post_process: bool = self.params.get("post_process", True)
         debug: bool = self.params.get("debug", False)
         lang_namespace: bool = self.params.get("lang_namespace", False)
         self.atom_lang: str = self.lang if lang_namespace else ""
@@ -245,8 +231,6 @@ class AlphaBetaParser(Parser):
 
         self.alpha: Alpha = Alpha(use_atomizer=True)
 
-        self.normalise: bool = normalise
-        self.post_process: bool = post_process
         self.debug: bool = debug
 
         self.atom2token: dict[Atom, Token] = {}
@@ -327,12 +311,10 @@ class AlphaBetaParser(Parser):
                 self.debug_msg(f"After applying argument roles: {edge!s}")
                 edge = self._repair(edge)
                 self.debug_msg(f"After repair: {edge!s}")
-                if self.normalise:
-                    edge = self._normalise(edge)
-                    self.debug_msg(f"After normalisation: {edge!s}")
-                if self.post_process:
-                    edge = self._post_process(edge)
-                    self.debug_msg(f"After post-processing: {edge!s}")
+                edge = self._normalise(edge)
+                self.debug_msg(f"After normalisation: {edge!s}")
+                edge = self._post_process(edge)
+                self.debug_msg(f"After post-processing: {edge!s}")
                 if edge is not None:
                     atom2word = self._generate_atom2word(edge, offset=offset)
 

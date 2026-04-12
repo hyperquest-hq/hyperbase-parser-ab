@@ -11,7 +11,7 @@
 ### Removed
 
 - Strict rules.
-- `beta` parameter.
+- Parameters: `beta`, `normalise` and `post_process`.
 
 ## [0.3.0] - 11-04-2026
 
