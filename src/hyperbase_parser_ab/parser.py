@@ -110,7 +110,7 @@ def _modifier_type_and_subtype(token: Token) -> str:
     elif pos == "PART":
         return "Mi"  # infinitive
     elif pos == "ADV":  # adverb
-        return "M"  # quintissential modifier, no subtype needed
+        return "Mb"
     else:
         return "M"
 
@@ -119,7 +119,6 @@ def _builder_type_and_subtype(token: Token) -> str:
     pos: str = token.pos_
     dep: str = token.dep_
     if dep in {"case", "pg", "ag"}:
-        # if token.head.dep_ == 'poss':
         return "Bp"
     elif pos == "ADP":
         return "Br"  # relational (proposition)
@@ -400,6 +399,10 @@ class AlphaBetaParser(Parser):
             "ROOT",
             "oa",
             "pd",
+            # clausal complement, these are probably going to be nested relations
+            "xcomp",
+            "ccomp",
+            "oc",
         }:
             return "o"
         # indirect object
@@ -412,12 +415,6 @@ class AlphaBetaParser(Parser):
             "mnr",
         }:
             return "x"
-        # parataxis
-        elif dep in {"parataxis", "par"} or dep in {"intj", "ng", "dm"}:
-            return "?"
-        # clausal complement
-        elif dep in {"xcomp", "ccomp", "oc"}:
-            return "r"
         else:
             return "?"
 
@@ -937,13 +934,56 @@ class AlphaBetaParser(Parser):
             _ars: str = ""
             for ar, subedge in zip(ars, edge[1:], strict=True):
                 _ar: str = ar
-                if ar == "?":
-                    if subedge.mt == "R":
-                        _ar = "r"
-                    elif subedge.mt == "S":
-                        _ar = "x"
+                if ar == "?" and subedge.mt in {"R", "S"}:
+                    _ar = "x"
                 _ars += _ar
             return self._replace_argroles(edge, _ars)
+        return edge
+
+    def _fix_spec_object(self, edge: Hyperedge) -> Hyperedge:
+        if edge.atom:
+            return edge
+        new_edge: Hyperedge = hedge(
+            [self._fix_spec_object(subedge) for subedge in edge]
+        )
+        if new_edge is None:
+            return edge
+        edge = new_edge
+
+        ars: str = edge.argroles()
+        if edge.mt != "R" or "o" not in ars:
+            return edge
+
+        for i, ar in enumerate(ars):
+            if ar == "o":
+                arg: Hyperedge = edge[i + 1]
+                if (
+                    arg.not_atom
+                    and arg.mt == "S"
+                    and any(subedge.mt == "R" for subedge in arg[1:])
+                ):
+                    # Get trigger and change type from T to M
+                    trigger: Hyperedge = arg[0]
+                    trigger_atom: Atom = trigger.inner_atom()
+                    new_mod_atom: Atom = trigger_atom.replace_atom_part(1, "Mr")
+                    self._update_atom(trigger_atom, new_mod_atom)
+
+                    if trigger.atom:
+                        new_mod: Hyperedge = new_mod_atom
+                    else:
+                        new_mod = trigger.replace_atom(
+                            trigger_atom, new_mod_atom, unique=True
+                        )
+
+                    # Wrap predicate connector with modifier
+                    new_connector: Hyperedge = hedge((new_mod, edge[0]))
+
+                    # Replace specification with its arguments
+                    new_args: list[Hyperedge] = (
+                        list(edge[1 : i + 1]) + list(arg[1:]) + list(edge[i + 2 :])
+                    )
+                    return hedge([new_connector, *new_args])
+
         return edge
 
     def _flatten_conjunctions(self, edge: Hyperedge) -> Hyperedge:
@@ -974,6 +1014,7 @@ class AlphaBetaParser(Parser):
         if edge is None:
             return None
         _edge: Hyperedge = self._fix_argroles(edge)
+        _edge = self._fix_spec_object(_edge)
         _edge = self._process_colon_conjunctions(_edge)
         _edge = self._flatten_conjunctions(_edge)
         return _edge

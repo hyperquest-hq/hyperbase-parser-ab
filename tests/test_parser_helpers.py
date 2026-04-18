@@ -128,7 +128,7 @@ class TestModifierTypeAndSubtype:
 
     def test_adverb(self):
         token = _mock_token(pos="ADV", dep="advmod")
-        assert _modifier_type_and_subtype(token) == "M"
+        assert _modifier_type_and_subtype(token) == "Mb"
 
     def test_fallback(self):
         token = _mock_token(pos="X", dep="dep")

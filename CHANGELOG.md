@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Simplified parses, "r" argrole no longer produced.
+
 ### Removed
 
 - Strict rules.
