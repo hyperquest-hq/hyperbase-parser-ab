@@ -30,7 +30,7 @@ dependencies = [
     "scikit-learn>=1.3.0",
     "spacy>=3.8.0",
     "torch>=2.0.0",
-    "transformers>=4.46.0",
+    "transformers>=4.45.2",
     "pip", # so that spaCy models can be easily installed with uv
 ]
 
