@@ -9,6 +9,7 @@
 ### Changed
 
 - Simplified parses, "r" argrole no longer produced.
+- Adapted to REPL API (multiple results per parse possible).
 
 ### Removed
 

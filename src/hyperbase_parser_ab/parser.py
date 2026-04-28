@@ -327,6 +327,7 @@ class AlphaBetaParser(Parser):
                 tokens=[str(token) for token in sent],
                 tok_pos=hedge(tok_pos_str),
                 failed=failed,
+                extra={"spacy_sent": sent},
             )
         except Exception as e:
             print(f'Caught exception: {e!s} while parsing: "{sent!s}"')

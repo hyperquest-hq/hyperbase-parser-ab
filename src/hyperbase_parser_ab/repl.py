@@ -53,26 +53,29 @@ def _build_dependency_tree(
 
 
 def _make_pre_result_hook(parser: AlphaBetaParser) -> PreResultHook:
-    """Return a pre-result hook bound to *parser*'s spaCy doc."""
+    """Return a pre-result hook that prints the dep tree of the current
+    parse's spaCy span."""
+    del parser  # unused, kept for symmetry with other hook factories
 
     def hook(ctx: ReplContext) -> None:
-        doc = getattr(parser, "doc", None)
-        if doc is None:
+        if ctx.result is None:
+            return
+        sent = ctx.result.extra.get("spacy_sent")
+        if sent is None:
+            return
+        dep_tree = _build_dependency_tree(sent.root)
+        if dep_tree is None:
             return
         console: Console = ctx.session.console
-        for sent in doc.sents:
-            dep_tree = _build_dependency_tree(sent.root)
-            if dep_tree is None:
-                continue
-            console.print()
-            console.print(
-                Panel(
-                    dep_tree,
-                    title="[bold cyan]Dependency Parse Tree[/bold cyan]",
-                    border_style="cyan",
-                    box=box.ROUNDED,
-                )
+        console.print()
+        console.print(
+            Panel(
+                dep_tree,
+                title="[bold cyan]Dependency Parse Tree[/bold cyan]",
+                border_style="cyan",
+                box=box.ROUNDED,
             )
+        )
 
     return hook
 
