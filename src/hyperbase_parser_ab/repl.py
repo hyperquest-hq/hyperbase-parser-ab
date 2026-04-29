@@ -94,8 +94,13 @@ def _atoms_panel(trace: ParseTrace) -> Panel:
     table.add_column("refined", style="yellow")
     table.add_column("atom", style="green")
     table.add_column("dropped", style="red", justify="center")
+    table.add_column("top-3", style="dim")
 
     for at in trace.atoms:
+        if at.top_candidates:
+            top3 = ", ".join(f"{lbl}:{prob:.5f}" for lbl, prob in at.top_candidates[:3])
+        else:
+            top3 = "—"
         table.add_row(
             str(at.token_idx),
             at.token_text,
@@ -103,6 +108,7 @@ def _atoms_panel(trace: ParseTrace) -> Panel:
             at.refined_type,
             at.final_atom or "—",
             "✓" if at.dropped else "",
+            top3,
         )
 
     return Panel(

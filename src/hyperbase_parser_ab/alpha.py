@@ -58,24 +58,39 @@ class Alpha:
 
     def predict(
         self, sentence: Span, features: list[tuple[str, str, str, str, str]]
-    ) -> tuple[str, ...] | list[str]:
+    ) -> tuple[
+        tuple[str, ...] | list[str],
+        list[list[tuple[str, float]]],
+    ]:
         if self.atomizer:
-            preds: list[tuple[str, str]] = self.atomizer.atomize(
-                sentence=str(sentence), tokens=[str(token) for token in sentence]
+            preds = self.atomizer.atomize(
+                sentence=str(sentence),
+                tokens=[str(token) for token in sentence],
+                top_k=3,
             )
-            atom_types: list[str] = [pred[1] for pred in preds]
+            top_candidates: list[list[tuple[str, float]]] = [
+                pred[1]
+                for pred in preds  # type: ignore[misc]
+            ]
+            atom_types: list[str] = [cands[0][0] for cands in top_candidates]
 
             # force known cases
             for i in range(len(atom_types)):
                 if sentence[i].pos_ == "VERB":
                     atom_types[i] = "P"
-            return atom_types
+            return atom_types, top_candidates
         else:
             # an empty classifier always predicts 'C'
             if self.empty:
-                return tuple("C" for _ in range(len(features)))
+                return (
+                    tuple("C" for _ in range(len(features))),
+                    [[] for _ in features],
+                )
             _features: NDArray | spmatrix = self.encX.transform(np.array(features))
             preds_arr: NDArray | spmatrix = self.ency.inverse_transform(
                 self.clf.predict(_features)
             )
-            return tuple(pred[0] if pred else "C" for pred in preds_arr)
+            return (
+                tuple(pred[0] if pred else "C" for pred in preds_arr),
+                [[] for _ in features],
+            )

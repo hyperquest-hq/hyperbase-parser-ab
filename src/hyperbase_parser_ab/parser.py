@@ -71,9 +71,9 @@ def _edge2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
 # fix known cases where classifier fails
 def _fix_atom_type(atom_type: str, token: Token) -> str:
     tag: str = token.tag_
-    dep: str = token.dep_
-    if tag == "ADP" and dep == "case":
-        return "B"
+    # dep: str = token.dep_
+    # if tag == "ADP" and dep == "case":
+    #     return "B"
     if tag == "NOUN":
         return "C"
     else:
@@ -731,12 +731,16 @@ class AlphaBetaParser(Parser):
             features.append((tag, dep, hpos, hdep, pos_after))
 
         assert self.alpha is not None, "Alpha must be initialized before parsing"
-        atom_types: tuple[str, ...] | list[str] = self.alpha.predict(sentence, features)
+        atom_types: tuple[str, ...] | list[str]
+        top_candidates: list[list[tuple[str, float]]]
+        atom_types, top_candidates = self.alpha.predict(sentence, features)
 
         self.token2atom = {}
 
         atomseq: list[Atom] = []
-        for token, predicted_type in zip(sentence, atom_types, strict=True):
+        for token, predicted_type, candidates in zip(
+            sentence, atom_types, top_candidates, strict=True
+        ):
             atom: Atom | None
             refined_type: str
             atom, refined_type = self._parse_token(token, predicted_type)
@@ -755,6 +759,7 @@ class AlphaBetaParser(Parser):
                         refined_type=refined_type,
                         final_atom=str(atom) if atom is not None else "",
                         dropped=atom is None,
+                        top_candidates=candidates,
                     )
                 )
         self.debug_msg(f"Atom sequence: {atomseq}")

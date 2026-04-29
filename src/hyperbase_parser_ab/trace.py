@@ -20,6 +20,7 @@ class AtomTrace:
     refined_type: str
     final_atom: str
     dropped: bool
+    top_candidates: list[tuple[str, float]] = field(default_factory=list)
 
 
 @dataclass
