@@ -20,6 +20,13 @@ from spacy.tokens import Doc, Span, Token
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import SPACY_MODELS
 from hyperbase_parser_ab.rules import RULES, Rule, apply_rule
+from hyperbase_parser_ab.trace import (
+    AtomTrace,
+    ParseTrace,
+    RuleCandidate,
+    RuleIteration,
+    rule_repr,
+)
 
 
 def _edge2txt_parts(
@@ -67,6 +74,8 @@ def _fix_atom_type(atom_type: str, token: Token) -> str:
     dep: str = token.dep_
     if tag == "ADP" and dep == "case":
         return "B"
+    if tag == "NOUN":
+        return "C"
     else:
         return atom_type
 
@@ -244,13 +253,21 @@ class AlphaBetaParser(Parser):
         self.cur_text: str | None = None
         self.doc: Doc | None = None
 
+        self._repl_session: Any = None
+        self._cur_trace: ParseTrace | None = None
+
     def debug_msg(self, msg: str) -> None:
         if self.debug:
             print(msg)
 
+    def _report_enabled(self) -> bool:
+        sess: Any = self._repl_session
+        return bool(sess and sess.settings.get("report", False))
+
     def install_repl(self, session: object) -> None:
         from hyperbase_parser_ab.repl import install
 
+        self._repl_session = session
         install(self, session)
 
     def parse_sentence(self, sentence: str) -> list[ParseResult]:
@@ -281,6 +298,8 @@ class AlphaBetaParser(Parser):
         self, sent: Span, atom_sequence: list[Atom] | None = None, offset: int = 0
     ) -> ParseResult | None:
         try:
+            self._cur_trace = ParseTrace() if self._report_enabled() else None
+
             if atom_sequence is None:
                 atom_sequence = self._build_atom_sequence(sent)
 
@@ -293,6 +312,8 @@ class AlphaBetaParser(Parser):
             if result and len(result) == 1:
                 edge = non_unique(result[0])
                 self.debug_msg(f"Initial parse: {edge!s}")
+                if self._cur_trace is not None:
+                    self._cur_trace.post_processing.append(("initial", str(edge)))
 
             # Reject pathologically deep parses before they reach the
             # recursive transforms below (which would otherwise blow the
@@ -308,12 +329,22 @@ class AlphaBetaParser(Parser):
             if edge:
                 edge = self._apply_arg_roles(edge)
                 self.debug_msg(f"After applying argument roles: {edge!s}")
+                if self._cur_trace is not None:
+                    self._cur_trace.post_processing.append(("arg_roles", str(edge)))
                 edge = self._repair(edge)
                 self.debug_msg(f"After repair: {edge!s}")
+                if self._cur_trace is not None:
+                    self._cur_trace.post_processing.append(("repair", str(edge)))
                 edge = self._normalise_modifiers(edge)
                 self.debug_msg(f"After modifier normalisation: {edge!s}")
+                if self._cur_trace is not None:
+                    self._cur_trace.post_processing.append(
+                        ("normalise_modifiers", str(edge))
+                    )
                 edge = self._post_process(edge)
                 self.debug_msg(f"After post-processing: {edge!s}")
+                if self._cur_trace is not None and edge is not None:
+                    self._cur_trace.post_processing.append(("post_process", str(edge)))
                 if edge is not None:
                     atom2word = self._generate_atom2word(edge, offset=offset)
 
@@ -321,13 +352,16 @@ class AlphaBetaParser(Parser):
                 return None
 
             tok_pos_str = _generate_tok_pos(atom2word, edge)
+            extra: dict[str, Any] = {"spacy_sent": sent}
+            if self._cur_trace is not None:
+                extra["parse_trace"] = self._cur_trace
             return ParseResult(
                 edge=edge,
                 text=str(sent).strip(),
                 tokens=[str(token) for token in sent],
                 tok_pos=hedge(tok_pos_str),
                 failed=failed,
-                extra={"spacy_sent": sent},
+                extra=extra,
             )
         except Exception as e:
             print(f'Caught exception: {e!s} while parsing: "{sent!s}"')
@@ -660,10 +694,10 @@ class AlphaBetaParser(Parser):
                 atom2word[uatom] = word
         return atom2word
 
-    def _parse_token(self, token: Token, atom_type: str) -> Atom | None:
+    def _parse_token(self, token: Token, atom_type: str) -> tuple[Atom | None, str]:
         atom_type = _fix_atom_type(atom_type, token)
         if atom_type == "X":
-            return None
+            return None, atom_type
         elif atom_type == "C":
             atom_type = _concept_type_and_subtype(token)
         elif atom_type == "M":
@@ -680,7 +714,7 @@ class AlphaBetaParser(Parser):
         atom: Atom = self._build_atom(token, atom_type, last_token)
         self.debug_msg(f"ATOM: {atom}")
 
-        return atom
+        return atom, atom_type
 
     def _build_atom_sequence(self, sentence: Span) -> list[Atom]:
         features: list[tuple[str, str, str, str, str]] = []
@@ -702,14 +736,27 @@ class AlphaBetaParser(Parser):
         self.token2atom = {}
 
         atomseq: list[Atom] = []
-        for token, atom_type in zip(sentence, atom_types, strict=True):
-            atom: Atom | None = self._parse_token(token, atom_type)
+        for token, predicted_type in zip(sentence, atom_types, strict=True):
+            atom: Atom | None
+            refined_type: str
+            atom, refined_type = self._parse_token(token, predicted_type)
             if atom:
                 uatom: Atom = UniqueAtom(atom)
                 self.atom2token[uatom] = token
                 self.token2atom[token] = uatom
                 self.orig_atom[uatom] = uatom
                 atomseq.append(uatom)
+            if self._cur_trace is not None:
+                self._cur_trace.atoms.append(
+                    AtomTrace(
+                        token_text=token.text,
+                        token_idx=token.i,
+                        predicted_type=predicted_type,
+                        refined_type=refined_type,
+                        final_atom=str(atom) if atom is not None else "",
+                        dropped=atom is None,
+                    )
+                )
         self.debug_msg(f"Atom sequence: {atomseq}")
         return atomseq
 
@@ -772,13 +819,20 @@ class AlphaBetaParser(Parser):
                         if depth < mdepth:
                             mdepth = depth
 
-        return (10000000 if conn else 0) + (mdepth * 100) + self._adjust_score(edges)
+        return (10000000 if conn else 0) + (mdepth * 100)  # + self._adjust_score(edges)
 
     def _parse_atom_sequence(
         self, atom_sequence: list[Atom]
     ) -> tuple[list[Hyperedge] | None, bool]:
         sequence: list[Hyperedge] = list(atom_sequence)
         while True:
+            iteration: RuleIteration | None = None
+            if self._cur_trace is not None:
+                iteration = RuleIteration(
+                    iteration=len(self._cur_trace.iterations),
+                    sequence_repr=[str(e) for e in sequence],
+                )
+
             action: tuple[Rule, int, Hyperedge, int, int] | None = None
             best_score: int = -999999999
             for rule_number, rule in enumerate(RULES):
@@ -787,13 +841,27 @@ class AlphaBetaParser(Parser):
                     new_edge: Hyperedge | None = apply_rule(rule, sequence, pos)
                     if new_edge:
                         score: int = self._score(sequence[pos - window_start : pos + 1])
-                        score -= rule_number
+                        # score -= rule_number
+                        if iteration is not None:
+                            iteration.candidates.append(
+                                RuleCandidate(
+                                    rule_index=rule_number,
+                                    rule_repr=rule_repr(rule, rule_number),
+                                    pos=pos,
+                                    score=score,
+                                    new_edge_repr=str(new_edge),
+                                )
+                            )
                         if score > best_score:
                             action = (rule, score, new_edge, window_start, pos)
                             best_score = score
+                    elif iteration is not None:
+                        iteration.rejections.append((rule_number, pos))
 
             # parse failed, make best effort to return something
             if action is None:
+                if iteration is not None:
+                    iteration.fallback_used = True
                 # if all else fails...
                 if len(sequence) > 0:
                     fallback: Hyperedge = hedge([":/J/.", *sequence[:2]])
@@ -801,6 +869,8 @@ class AlphaBetaParser(Parser):
                         [fallback] if fallback else []
                     ) + sequence[2:]
                 else:
+                    if iteration is not None and self._cur_trace is not None:
+                        self._cur_trace.iterations.append(iteration)
                     return None, True
             else:
                 rule, _, new_edge, window_start, pos = action
@@ -810,10 +880,20 @@ class AlphaBetaParser(Parser):
                     *sequence[pos + 1 :],
                 ]
 
+                if iteration is not None:
+                    winning_rule_index: int = RULES.index(rule)
+                    for cand in iteration.candidates:
+                        if cand.rule_index == winning_rule_index and cand.pos == pos:
+                            cand.is_winner = True
+                            break
+
                 self.debug_msg(f"rule: {rule}")
                 self.debug_msg(f"score: {score}")
                 self.debug_msg(f"new_edge: {new_edge}")
                 self.debug_msg(f"new_sequence: {new_sequence}")
+
+            if iteration is not None and self._cur_trace is not None:
+                self._cur_trace.iterations.append(iteration)
 
             sequence = new_sequence
             if len(sequence) < 2:

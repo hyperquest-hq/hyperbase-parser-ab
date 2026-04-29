@@ -5,6 +5,7 @@
 ### Added
 
 - Atom classifier fixed cases.
+- Parse trace reports in the repl.
 
 ### Changed
 
@@ -22,7 +23,7 @@
 
 - Maximum depth protection.
 - Conjunction flattening.
-- Show dependency parse tree on REPL.
+- Show dependency parse tree in the repl.
 - lang_namespace parameter, defaults to False (no language namespaces in atoms).
 
 ### Changed
