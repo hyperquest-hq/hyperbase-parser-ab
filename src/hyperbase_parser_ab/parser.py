@@ -898,23 +898,6 @@ class AlphaBetaParser(Parser):
         else:
             raise RuntimeError("spaCy model failed to initialize.")
 
-    def _edge2toks(self, edge: Hyperedge) -> None:
-        uatoms: list[Hyperedge] = [unique(atom) for atom in edge.all_atoms()]
-        toks: tuple[Token, ...] = tuple(
-            sorted(
-                [
-                    self.atom2token[cast(Atom, uatom)]
-                    for uatom in uatoms
-                    if uatom is not None and uatom in self.atom2token
-                ]
-            )
-        )
-        self.edge2toks[edge] = toks
-        self.toks2edge[toks] = edge
-        if edge.not_atom:
-            for subedge in edge:
-                self._edge2toks(subedge)
-
     # ===============
     # Post-processing
     # ===============
