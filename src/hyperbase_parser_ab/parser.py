@@ -2,7 +2,6 @@ import re
 import traceback
 from typing import Any, cast
 
-import hyperbase.constants as const
 import spacy
 from hyperbase.builders import build_atom, hedge
 from hyperbase.hyperedge import (
@@ -27,45 +26,6 @@ from hyperbase_parser_ab.trace import (
     RuleIteration,
     rule_repr,
 )
-
-
-def _edge2txt_parts(
-    edge: Hyperedge, parse: dict[str, Any]
-) -> list[tuple[str, str, int]]:
-    atoms: list[Atom] = [UniqueAtom(atom) for atom in edge.all_atoms()]
-    tokens: list[Token] = [
-        parse["atom2token"][atom] for atom in atoms if atom in parse["atom2token"]
-    ]
-    txts: list[str] = [token.text for token in tokens]
-    pos: list[int] = [token.i for token in tokens]
-    return list(zip(txts, txts, pos, strict=True))
-
-
-def _edge2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
-    if edge.not_atom and str(edge[0]) == const.possessive_builder:
-        return _poss2text(edge, parse)
-
-    parts: list[tuple[str, str, int]] = _edge2txt_parts(edge, parse)
-    parts = sorted(parts, key=lambda x: x[2])
-
-    prev_txt: str | None = None
-    txt_parts: list[str] = []
-    sentence: str = str(parse["spacy_sentence"])
-    for txt, _txt, _ in parts:
-        if prev_txt is not None:
-            res: re.Match[str] | None = re.search(
-                rf"{re.escape(prev_txt)}(.*?){re.escape(txt)}", sentence
-            )
-            if res:
-                sep: str = res.group(1)
-            else:
-                sep = " "
-            if any(letter.isalnum() for letter in sep):
-                sep = " "
-            txt_parts.append(sep)
-        txt_parts.append(_txt)
-        prev_txt = txt
-    return "".join(txt_parts)
 
 
 def _concept_type_and_subtype(token: Token) -> str:
@@ -137,24 +97,8 @@ def _predicate_type_and_subtype(token: Token) -> str:
         return "P"
 
 
-def _predicate_post_type_and_subtype(
-    edge: Hyperedge, subparts: list[str], args_string: str
-) -> str:
-    return subparts[0]
-
-
 def _is_verb(token: Token) -> bool:
     return token.pos_ == "VERB"
-
-
-def _poss2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
-    part1: str = _edge2text(edge[1], parse).strip()
-    part2: str = _edge2text(edge[2], parse)
-    if part1[-1] == "s":
-        poss: str = "'"
-    else:
-        poss = "'s"
-    return f"{part1}{poss} {part2}"
 
 
 def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -> str:
@@ -230,15 +174,10 @@ class AlphaBetaParser(Parser):
         self.debug: bool = debug
 
         self.atom2token: dict[Atom, Token] = {}
-        self.temp_atoms: set[Atom] = set()
         self.orig_atom: dict[Atom, UniqueAtom] = {}
         self.token2atom: dict[Token, Atom] = {}
         self.depths: dict[Atom, int] = {}
         self.connections: set[tuple[Atom, Atom]] = set()
-        self.edge2text: dict[Hyperedge, str] = {}
-        self.edge2toks: dict[Hyperedge, tuple[Token, ...]] = {}
-        self.toks2edge: dict[tuple[Token, ...], Hyperedge] = {}
-        self.cur_text: str | None = None
         self.doc: Doc | None = None
 
         self._repl_session: Any = None
@@ -259,12 +198,10 @@ class AlphaBetaParser(Parser):
         install(self, session)
 
     def parse_sentence(self, sentence: str) -> list[ParseResult]:
-        # This runs spacy own sentensizer anyway...
-
         sentence = re.sub(r"\s+", " ", sentence).strip()
 
         if self.nlp:
-            self.reset(sentence)
+            self.orig_atom = {}
             parses: list[ParseResult] = []
             try:
                 self.doc = self.nlp(sentence)
@@ -356,44 +293,13 @@ class AlphaBetaParser(Parser):
             traceback.print_exc()
             return None
 
-    def manual_atom_sequence(
-        self, sentence: Span, token2atom: dict[Token, Atom]
-    ) -> list[Atom]:
-        self.token2atom = {}
-
-        atomseq: list[Atom] = []
-        for token in sentence:
-            if token in token2atom:
-                atom: Atom | None = token2atom[token]
-            else:
-                atom = None
-            if atom:
-                uatom: Atom = UniqueAtom(atom)
-                self.dep_[uatom] = token
-                self.token2atom[token] = uatom
-                self.orig_atom[uatom] = uatom
-                atomseq.append(uatom)
-        return atomseq
-
-    def reset(self, text: str) -> None:
-        self.dep_: dict[Atom, Token] = {}
-        self.temp_atoms = set()
-        self.orig_atom = {}
-        self.edge2toks = {}
-        self.toks2edge = {}
-        self.edge2coref: dict[Hyperedge, object] = {}
-        self.resolved_corefs: set[object] = set()
-        self.cur_text = text
-
     def _builder_arg_roles(self, edge: Hyperedge) -> str:
         depth1: int = self._dep_depth(edge[1])
         depth2: int = self._dep_depth(edge[2])
-        if depth1 < depth2:
-            return "ma"
-        elif depth1 > depth2:
+        if depth1 > depth2:
             return "am"
         else:
-            return "mm"
+            return "ma"
 
     def _relation_arg_role(self, edge: Hyperedge) -> str:
         head_token: Token | None = self._head_token(edge)
@@ -522,20 +428,13 @@ class AlphaBetaParser(Parser):
     ) -> Atom:
         text: str = token.text.lower()
 
-        # first naive assignment of predicate subtype
-        # (can be revised at post-processing stage)
-        if ent_type == "Pd":
-            # interrogative cases
-            if (
-                last_token
-                and last_token.tag_ == "."
-                and last_token.dep_ == "punct"
-                and last_token.lemma_.strip() == "?"
-            ):
+        if ent_type == "Pd" and last_token:
+            # naive interrogative cases
+            if str(last_token).strip() == "?":
                 ent_type = "P?"
-            # declarative (by default)
-            else:
-                ent_type = "Pd"
+            # naive imperative cases
+            elif str(last_token).strip() == "!":
+                ent_type = "P!"
 
         return build_atom(text, ent_type, self.atom_lang)
 
@@ -595,7 +494,6 @@ class AlphaBetaParser(Parser):
         unew: Atom = UniqueAtom(new)
         if uold in self.atom2token:
             self.atom2token[unew] = self.atom2token[uold]
-            self.temp_atoms.add(uold)
         self.orig_atom[unew] = uold
 
     def _add_argument(
@@ -627,17 +525,14 @@ class AlphaBetaParser(Parser):
             subparts: list[str] = pred.parts()[1].split(".")
             args: list[str] = [self._relation_arg_role(param) for param in edge[1:]]
             args_string: str = "".join(args)
-            # TODO: this is done to detect imperative, to refactor
-            pt: str = _predicate_post_type_and_subtype(edge, subparts, args_string)
             if len(subparts) > 2:
-                new_part: str = f"{pt}.{args_string}.{subparts[2]}"
+                new_part: str = f"{subparts[0]}.{args_string}.{subparts[2]}"
             else:
-                new_part = f"{pt}.{args_string}"
+                new_part = f"{subparts[0]}.{args_string}"
             new_pred: Atom = pred.replace_atom_part(1, new_part)
             unew_pred: Atom = UniqueAtom(new_pred)
             upred: Atom = UniqueAtom(pred)
             self.atom2token[unew_pred] = self.atom2token[upred]
-            self.temp_atoms.add(upred)
             self.orig_atom[unew_pred] = upred
             new_entity = edge.replace_atom(pred, new_pred, unique=True)
 
@@ -658,7 +553,6 @@ class AlphaBetaParser(Parser):
                 unew_builder: Atom = UniqueAtom(new_builder)
                 if ubuilder in self.atom2token:
                     self.atom2token[unew_builder] = self.atom2token[ubuilder]
-                    self.temp_atoms.add(ubuilder)
                 self.orig_atom[unew_builder] = ubuilder
                 new_entity = edge.replace_atom(builder, new_builder, unique=True)
 
@@ -929,24 +823,6 @@ class AlphaBetaParser(Parser):
         if ars == "":
             return edge
         return self._add_argument(edge, arg, "x", len(edge))
-
-    def _insert_spec_rightmost_relation(
-        self, edge: Hyperedge, arg: Hyperedge
-    ) -> Hyperedge:
-        if edge.atom:
-            return edge
-        if "P" in [atom.mt for atom in edge[-1].atoms()]:
-            return hedge(
-                [*edge[:-1], self._insert_spec_rightmost_relation(edge[-1], arg)]
-            )
-        if edge[0].mt == "P":
-            return self._add_argument(edge, arg, "x", len(edge))
-        for pos, subedge in reversed(list(enumerate(edge))):
-            if "P" in [atom.mt for atom in subedge.atoms()]:
-                new_edge_list: list[Hyperedge] = list(edge)
-                new_edge_list[pos] = self._insert_spec_rightmost_relation(subedge, arg)
-                return hedge(new_edge_list)
-        return edge
 
     def _process_colon_conjunctions(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:

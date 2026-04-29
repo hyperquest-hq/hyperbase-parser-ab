@@ -205,11 +205,11 @@ class TestParserBuilderArgRoles:
         assert parser._builder_arg_roles(edge) == "am"
 
     def test_equal_depth(self):
-        """Equal depths → 'mm'."""
+        """Equal depths → 'ma'."""
         parser = _make_parser()
         edge = hedge("(of/Br/en paris/Cp/en france/Cp/en)")
         self._setup_edge_with_depths(parser, edge, {"of": 1, "paris": 2, "france": 2})
-        assert parser._builder_arg_roles(edge) == "mm"
+        assert parser._builder_arg_roles(edge) == "ma"
 
 
 class TestParserDebug:
@@ -434,16 +434,3 @@ class TestParserFixSpecObject:
             "(((not/M/en because/Mr/en) runs/Pd.so/en) cat/Cc/en (runs/Pd.s/en dog/Cc/en))"
         )
         assert result == expected
-
-
-class TestParserReset:
-    def test_reset_clears_state(self):
-        parser = _make_parser()
-        parser.temp_atoms.add("dummy")
-        parser.orig_atom["dummy"] = "dummy"
-        parser.reset("new text")
-        assert parser.cur_text == "new text"
-        assert len(parser.temp_atoms) == 0
-        assert len(parser.orig_atom) == 0
-        assert len(parser.edge2toks) == 0
-        assert len(parser.toks2edge) == 0
