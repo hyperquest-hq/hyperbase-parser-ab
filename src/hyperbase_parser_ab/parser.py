@@ -68,18 +68,6 @@ def _edge2text(edge: Hyperedge, parse: dict[str, Any]) -> str:
     return "".join(txt_parts)
 
 
-# fix known cases where classifier fails
-def _fix_atom_type(atom_type: str, token: Token) -> str:
-    tag: str = token.tag_
-    # dep: str = token.dep_
-    # if tag == "ADP" and dep == "case":
-    #     return "B"
-    if tag == "NOUN":
-        return "C"
-    else:
-        return atom_type
-
-
 def _concept_type_and_subtype(token: Token) -> str:
     pos: str = token.pos_
     dep: str = token.dep_
@@ -695,7 +683,6 @@ class AlphaBetaParser(Parser):
         return atom2word
 
     def _parse_token(self, token: Token, atom_type: str) -> tuple[Atom | None, str]:
-        atom_type = _fix_atom_type(atom_type, token)
         if atom_type == "X":
             return None, atom_type
         elif atom_type == "C":
