@@ -6,7 +6,6 @@ from hyperbase import hedge
 from hyperbase.hyperedge import UniqueAtom
 
 from hyperbase_parser_ab.parser import (
-    _builder_type_and_subtype,
     _concept_type_and_subtype,
     _generate_tok_pos,
     _is_verb,
@@ -36,7 +35,7 @@ def _mock_token(pos="NOUN", dep="nsubj", tag="NN", head_dep=None, head_pos=None)
 class TestConceptTypeAndSubtype:
     def test_nmod_dependency(self):
         token = _mock_token(pos="NOUN", dep="nmod")
-        assert _concept_type_and_subtype(token) == "Cm"
+        assert _concept_type_and_subtype(token) == "Cx"
 
     def test_adjective(self):
         token = _mock_token(pos="ADJ", dep="amod")
@@ -52,7 +51,7 @@ class TestConceptTypeAndSubtype:
 
     def test_number(self):
         token = _mock_token(pos="NUM", dep="nummod")
-        assert _concept_type_and_subtype(token) == "C#"
+        assert _concept_type_and_subtype(token) == "Cq"
 
     def test_determiner(self):
         token = _mock_token(pos="DET", dep="det")
@@ -64,12 +63,12 @@ class TestConceptTypeAndSubtype:
 
     def test_fallback(self):
         token = _mock_token(pos="X", dep="dep")
-        assert _concept_type_and_subtype(token) == "C"
+        assert _concept_type_and_subtype(token) == "Cx"
 
     def test_nmod_takes_priority_over_pos(self):
         """nmod dependency should override any POS tag."""
         token = _mock_token(pos="ADJ", dep="nmod")
-        assert _concept_type_and_subtype(token) == "Cm"
+        assert _concept_type_and_subtype(token) == "Cx"
 
 
 # ==========================
@@ -96,11 +95,11 @@ class TestModifierTypeAndSubtype:
 
     def test_preposition(self):
         token = _mock_token(pos="ADP", dep="prep")
-        assert _modifier_type_and_subtype(token) == "Mt"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
     def test_conjunctional(self):
         token = _mock_token(pos="CCONJ", dep="preconj")
-        assert _modifier_type_and_subtype(token) == "Mj"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
     def test_adjective(self):
         token = _mock_token(pos="ADJ", dep="amod")
@@ -112,7 +111,7 @@ class TestModifierTypeAndSubtype:
 
     def test_number(self):
         token = _mock_token(pos="NUM", dep="nummod")
-        assert _modifier_type_and_subtype(token) == "M#"
+        assert _modifier_type_and_subtype(token) == "Mq"
 
     def test_auxiliary_modal(self):
         token = _mock_token(pos="AUX", dep="aux")
@@ -120,50 +119,19 @@ class TestModifierTypeAndSubtype:
 
     def test_particle(self):
         token = _mock_token(pos="VERB", dep="prt")
-        assert _modifier_type_and_subtype(token) == "Ml"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
     def test_infinitive_part(self):
         token = _mock_token(pos="PART", dep="mark")
-        assert _modifier_type_and_subtype(token) == "Mi"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
     def test_adverb(self):
         token = _mock_token(pos="ADV", dep="advmod")
-        assert _modifier_type_and_subtype(token) == "Mb"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
     def test_fallback(self):
         token = _mock_token(pos="X", dep="dep")
-        assert _modifier_type_and_subtype(token) == "M"
-
-
-# =========================
-# _builder_type_and_subtype
-# =========================
-
-
-class TestBuilderTypeAndSubtype:
-    def test_case_dependency(self):
-        token = _mock_token(pos="ADP", dep="case")
-        assert _builder_type_and_subtype(token) == "Bp"
-
-    def test_pg_dependency(self):
-        token = _mock_token(pos="ADP", dep="pg")
-        assert _builder_type_and_subtype(token) == "Bp"
-
-    def test_ag_dependency(self):
-        token = _mock_token(pos="ADP", dep="ag")
-        assert _builder_type_and_subtype(token) == "Bp"
-
-    def test_adposition(self):
-        token = _mock_token(pos="ADP", dep="prep")
-        assert _builder_type_and_subtype(token) == "Br"
-
-    def test_determiner(self):
-        token = _mock_token(pos="DET", dep="det")
-        assert _builder_type_and_subtype(token) == "Bd"
-
-    def test_fallback(self):
-        token = _mock_token(pos="CCONJ", dep="cc")
-        assert _builder_type_and_subtype(token) == "B"
+        assert _modifier_type_and_subtype(token) == "Mx"
 
 
 # ============================
@@ -174,37 +142,37 @@ class TestBuilderTypeAndSubtype:
 class TestPredicateTypeAndSubtype:
     def test_advcl(self):
         token = _mock_token(pos="VERB", dep="advcl")
-        assert _predicate_type_and_subtype(token) == "Pd"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_csubj(self):
         token = _mock_token(pos="VERB", dep="csubj")
-        assert _predicate_type_and_subtype(token) == "Pd"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_parataxis(self):
         token = _mock_token(pos="VERB", dep="parataxis")
-        assert _predicate_type_and_subtype(token) == "Pd"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_relcl(self):
         token = _mock_token(pos="VERB", dep="relcl")
-        assert _predicate_type_and_subtype(token) == "P"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_ccomp(self):
         token = _mock_token(pos="VERB", dep="ccomp")
-        assert _predicate_type_and_subtype(token) == "P"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_xcomp(self):
         token = _mock_token(pos="VERB", dep="xcomp")
-        assert _predicate_type_and_subtype(token) == "P"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_verb_with_other_dep(self):
-        """A VERB with an unclassified dep should be Pd."""
+        """A VERB with an unclassified dep should be Pv."""
         token = _mock_token(pos="VERB", dep="ROOT")
-        assert _predicate_type_and_subtype(token) == "Pd"
+        assert _predicate_type_and_subtype(token) == "Pv"
 
     def test_non_verb(self):
         """Non-verb tokens default to P."""
         token = _mock_token(pos="NOUN", dep="ROOT")
-        assert _predicate_type_and_subtype(token) == "P"
+        assert _predicate_type_and_subtype(token) == "Px"
 
 
 # ========

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.1] - work in progress
+## [0.4.0] - work in progress
 
 ### Added
 

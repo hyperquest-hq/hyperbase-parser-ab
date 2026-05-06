@@ -32,15 +32,22 @@ def _concept_type_and_subtype(token: Token) -> str:
     pos: str = token.pos_
     dep: str = token.dep_
     if dep == "nmod":
-        return "Cm"
+        return "Cx"
     return {
         "ADJ": "Ca",
         "NOUN": "Cc",
         "PROPN": "Cp",
-        "NUM": "C#",
+        "NUM": "Cq",
         "DET": "Cd",
         "PRON": "Ci",
-    }.get(pos, "C")
+    }.get(pos, "Cx")
+
+
+def _predicate_type_and_subtype(token: Token) -> str:
+    if _is_verb(token):
+        return "Pv"
+    else:
+        return "Px"
 
 
 def _modifier_type_and_subtype(token: Token) -> str:
@@ -50,51 +57,24 @@ def _modifier_type_and_subtype(token: Token) -> str:
         return "Mn"
     elif dep in {"poss", "pg", "ag"}:
         return "Mp"
-    elif dep == "prep":
-        return "Mt"  # preposition
-    elif dep == "preconj":
-        return "Mj"  # conjunctional
     elif pos == "ADJ":
         return "Ma"
     elif pos == "DET":
         return "Md"
     elif pos == "NUM":
-        return "M#"
+        return "Mq"
     elif pos == "AUX":
         return "Mm"  # modal
-    elif token.dep_ == "prt":
-        return "Ml"  # particle
-    elif pos == "PART":
-        return "Mi"  # infinitive
-    elif pos == "ADV":  # adverb
-        return "Mb"
     else:
-        return "M"
+        return "Mx"
 
 
-def _builder_type_and_subtype(token: Token) -> str:
-    pos: str = token.pos_
-    dep: str = token.dep_
-    if dep in {"case", "pg", "ag"}:
-        return "Bp"
-    elif pos == "ADP":
-        return "Br"  # relational (proposition)
-    elif pos == "DET":
-        return "Bd"
+def _trigger_type_and_subtype(token: Token) -> str:
+    # indirect object
+    if token.dep_ in {"iobj", "dative", "obl:arg", "da"}:
+        return "Ti"
     else:
-        return "B"
-
-
-def _predicate_type_and_subtype(token: Token) -> str:
-    dep: str = token.dep_
-    if dep in {"advcl", "csubj", "csubjpass", "parataxis"}:
-        return "Pd"
-    elif dep in {"relcl", "ccomp", "acl", "pcomp", "xcomp", "rc"}:
-        return "P"
-    elif _is_verb(token):
-        return "Pd"
-    else:
-        return "P"
+        return "Tx"
 
 
 def _is_verb(token: Token) -> bool:
@@ -335,7 +315,12 @@ class AlphaBetaParser(Parser):
         }:
             return "o"
         # indirect object
-        elif dep in {"iobj", "dative", "obl:arg", "da"} or dep in {
+        elif dep in {
+            "iobj",
+            "dative",
+            "obl",
+            "obl:arg",
+            "da",
             "advcl",
             "prep",
             "npadvmod",
@@ -406,55 +391,6 @@ class AlphaBetaParser(Parser):
                     if depth < mdepth:
                         mdepth = depth
         return mdepth
-
-    def _build_atom(
-        self, token: Token, ent_type: str, last_token: Token | None
-    ) -> Atom:
-        text: str = token.text.lower()
-        et: str = ent_type
-
-        if ent_type[0] == "P":
-            atom: Atom = self._build_atom_predicate(token, ent_type, last_token)
-        elif ent_type[0] == "T":
-            atom = self._build_atom_trigger(token, ent_type)
-        elif ent_type[0] == "M":
-            atom = self._build_atom_modifier(token)
-        else:
-            atom = build_atom(text, et, self.atom_lang)
-        return atom
-
-    def _build_atom_predicate(
-        self, token: Token, ent_type: str, last_token: Token | None
-    ) -> Atom:
-        text: str = token.text.lower()
-
-        if ent_type == "Pd" and last_token:
-            # naive interrogative cases
-            if str(last_token).strip() == "?":
-                ent_type = "P?"
-            # naive imperative cases
-            elif str(last_token).strip() == "!":
-                ent_type = "P!"
-
-        return build_atom(text, ent_type, self.atom_lang)
-
-    def _build_atom_trigger(self, token: Token, ent_type: str) -> Atom:
-        text: str = token.text.lower()
-
-        # indirect object
-        if token.dep_ in {"iobj", "dative", "obl:arg", "da"}:
-            et = "Ti"
-        elif _is_verb(token):
-            et = "Tv"
-        else:
-            et = ent_type
-
-        return build_atom(text, et, self.atom_lang)
-
-    def _build_atom_modifier(self, token: Token) -> Atom:
-        text: str = token.text.lower()
-        et: str = "Mv" if _is_verb(token) else _modifier_type_and_subtype(token)
-        return build_atom(text, et, self.atom_lang)
 
     def _repair(self, edge: Hyperedge) -> Hyperedge:
         if edge.not_atom:
@@ -581,18 +517,19 @@ class AlphaBetaParser(Parser):
             return None, atom_type
         elif atom_type == "C":
             atom_type = _concept_type_and_subtype(token)
+        elif atom_type == "P":
+            atom_type = _predicate_type_and_subtype(token)
         elif atom_type == "M":
             atom_type = _modifier_type_and_subtype(token)
         elif atom_type == "B":
-            atom_type = _builder_type_and_subtype(token)
-        elif atom_type == "P":
-            atom_type = _predicate_type_and_subtype(token)
+            atom_type = "Bx"
+        elif atom_type == "T":
+            atom_type = _trigger_type_and_subtype(token)
+        elif atom_type == "J":
+            atom_type = "Jx"
 
-        # last token is useful to determine predicate subtype
-        tokens: list[Token] = list(token.lefts) + list(token.rights)
-        last_token: Token | None = tokens[-1] if len(tokens) > 0 else None
-
-        atom: Atom = self._build_atom(token, atom_type, last_token)
+        text: str = token.text.lower()
+        atom: Atom = build_atom(text, atom_type, self.atom_lang)
         self.debug_msg(f"ATOM: {atom}")
 
         return atom, atom_type
