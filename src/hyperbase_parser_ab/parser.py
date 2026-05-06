@@ -132,6 +132,16 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
+            "atomizer_model_path": {
+                "type": str,
+                "default": None,
+                "description": (
+                    "Path or Hugging Face repo id to load the atomizer "
+                    "model from. Defaults to the bundled "
+                    "'hyperquest/atom-classifier' repo."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -146,6 +156,7 @@ class AlphaBetaParser(Parser):
         lang_namespace: bool = self.params.get("lang_namespace", False)
         self.atom_lang: str = self.lang if lang_namespace else ""
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
+        self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -165,6 +176,7 @@ class AlphaBetaParser(Parser):
         self.alpha: Alpha = Alpha(
             use_atomizer=True,
             use_atomizer_subtype=self.use_atomizer_subtype,
+            atomizer_model_path=self.atomizer_model_path,
         )
 
         self.debug: bool = debug
