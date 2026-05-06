@@ -567,6 +567,15 @@ class AlphaBetaParser(Parser):
 
         return atom, atom_type
 
+    def _fix_atom_classifications(
+        self, sentence: Span, atom_types: tuple[str, ...] | list[str]
+    ) -> list[str]:
+        fixed: list[str] = list(atom_types)
+        for i, token in enumerate(sentence):
+            if self.lang == "en" and token.text == "'s":
+                fixed[i] = "Bx"
+        return fixed
+
     def _build_atom_sequence(self, sentence: Span) -> list[Atom]:
         features: list[tuple[str, str, str, str, str]] = []
         for pos, token in enumerate(sentence):
@@ -585,6 +594,7 @@ class AlphaBetaParser(Parser):
         atom_types: tuple[str, ...] | list[str]
         top_candidates: list[list[tuple[str, float]]]
         atom_types, top_candidates = self.alpha.predict(sentence, features)
+        atom_types = self._fix_atom_classifications(sentence, atom_types)
 
         self.token2atom = {}
 
