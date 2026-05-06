@@ -120,6 +120,18 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
+            "use_atomizer_subtype": {
+                "type": bool,
+                "default": True,
+                "description": (
+                    "If True (default), use the atomizer's classification "
+                    "directly as the atom type+subtype. If False, refine the "
+                    "atomizer's prediction via _concept_type_and_subtype, "
+                    "_predicate_type_and_subtype, _modifier_type_and_subtype, "
+                    "_trigger_type_and_subtype, and force B/J types to Bx/Jx."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -133,6 +145,7 @@ class AlphaBetaParser(Parser):
         debug: bool = self.params.get("debug", False)
         lang_namespace: bool = self.params.get("lang_namespace", False)
         self.atom_lang: str = self.lang if lang_namespace else ""
+        self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -149,7 +162,10 @@ class AlphaBetaParser(Parser):
                 f"language models:\n{models_list}."
             )
 
-        self.alpha: Alpha = Alpha(use_atomizer=True)
+        self.alpha: Alpha = Alpha(
+            use_atomizer=True,
+            use_atomizer_subtype=self.use_atomizer_subtype,
+        )
 
         self.debug: bool = debug
 
@@ -515,18 +531,20 @@ class AlphaBetaParser(Parser):
     def _parse_token(self, token: Token, atom_type: str) -> tuple[Atom | None, str]:
         if atom_type == "X":
             return None, atom_type
-        elif atom_type == "C":
-            atom_type = _concept_type_and_subtype(token)
-        elif atom_type == "P":
-            atom_type = _predicate_type_and_subtype(token)
-        elif atom_type == "M":
-            atom_type = _modifier_type_and_subtype(token)
-        elif atom_type == "B":
-            atom_type = "Bx"
-        elif atom_type == "T":
-            atom_type = _trigger_type_and_subtype(token)
-        elif atom_type == "J":
-            atom_type = "Jx"
+
+        if not self.use_atomizer_subtype:
+            if atom_type == "C":
+                atom_type = _concept_type_and_subtype(token)
+            elif atom_type == "P":
+                atom_type = _predicate_type_and_subtype(token)
+            elif atom_type == "M":
+                atom_type = _modifier_type_and_subtype(token)
+            elif atom_type == "B":
+                atom_type = "Bx"
+            elif atom_type == "T":
+                atom_type = _trigger_type_and_subtype(token)
+            elif atom_type == "J":
+                atom_type = "Jx"
 
         text: str = token.text.lower()
         atom: Atom = build_atom(text, atom_type, self.atom_lang)

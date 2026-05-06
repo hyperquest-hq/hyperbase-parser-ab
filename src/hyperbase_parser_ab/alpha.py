@@ -10,10 +10,15 @@ from hyperbase_parser_ab.atomizer import Atomizer
 
 class Alpha:
     def __init__(
-        self, cases_str: str | None = None, use_atomizer: bool = False
+        self,
+        cases_str: str | None = None,
+        use_atomizer: bool = False,
+        use_atomizer_subtype: bool = True,
+        atomizer_model_path: str | None = None,
     ) -> None:
+        self.use_atomizer_subtype: bool = use_atomizer_subtype
         if use_atomizer:
-            self.atomizer: Atomizer | None = Atomizer()
+            self.atomizer: Atomizer | None = Atomizer(model_path=atomizer_model_path)
         elif cases_str:
             self.atomizer = None
 
@@ -74,10 +79,11 @@ class Alpha:
             ]
             atom_types: list[str] = [cands[0][0] for cands in top_candidates]
 
-            # force known cases
-            for i in range(len(atom_types)):
-                if sentence[i].pos_ == "VERB":
-                    atom_types[i] = "P"
+            if not self.use_atomizer_subtype:
+                # force known cases
+                for i in range(len(atom_types)):
+                    if sentence[i].pos_ == "VERB":
+                        atom_types[i] = "P"
             return atom_types, top_candidates
         else:
             # an empty classifier always predicts 'C'
