@@ -12,7 +12,7 @@ from hyperbase_parser_ab.parser import AlphaBetaParser
 class TestParserInitErrors:
     def test_unsupported_language_raises(self):
         with pytest.raises(RuntimeError, match="not recognized"):
-            AlphaBetaParser({"lang": "xx"})
+            AlphaBetaParser({"language": "xx"})
 
     def test_no_spacy_model_installed_raises(self):
         with (
@@ -23,7 +23,7 @@ class TestParserInitErrors:
             patch("hyperbase_parser_ab.parser.Alpha"),
             pytest.raises(RuntimeError, match="requires one of the following"),
         ):
-            AlphaBetaParser({"lang": "en"})
+            AlphaBetaParser({"language": "en"})
 
 
 def _make_parser(beta="repair"):
@@ -36,7 +36,7 @@ def _make_parser(beta="repair"):
     ):
         parser = AlphaBetaParser(
             {
-                "lang": "en",
+                "language": "en",
                 "beta": beta,
                 "normalise": True,
                 "post_process": True,

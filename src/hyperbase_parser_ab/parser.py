@@ -99,9 +99,9 @@ class AlphaBetaParser(Parser):
     def accepted_params(cls) -> dict[str, dict[str, Any]]:
         return {
             **super().accepted_params(),
-            "lang": {
+            "language": {
                 "type": str,
-                "default": None,
+                "default": "en",
                 "description": "Language code (e.g. 'de', 'en', 'fr').",
                 "required": True,
             },
@@ -148,7 +148,7 @@ class AlphaBetaParser(Parser):
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         super().__init__(params)
 
-        self.lang: str = self.params["lang"]
+        self.lang: str = self.params["language"]
 
         if self.lang not in SPACY_MODELS:
             raise RuntimeError(f"Language code '{self.lang}' is not recognized.")
