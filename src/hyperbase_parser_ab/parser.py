@@ -141,6 +141,7 @@ class AlphaBetaParser(Parser):
                     "'hyperquest/atom-classifier' repo."
                 ),
                 "required": False,
+                "is_path": True,
             },
         }
 
