@@ -542,21 +542,23 @@ class AlphaBetaParser(Parser):
         return atom2word
 
     def _parse_token(self, token: Token, atom_type: str) -> tuple[Atom | None, str]:
-        if atom_type == "X":
+        main_type = atom_type[0] if len(atom_type) > 0 else ""
+
+        if main_type == "X":
             return None, atom_type
 
         if not self.use_atomizer_subtype:
-            if atom_type == "C":
+            if main_type == "C":
                 atom_type = _concept_type_and_subtype(token)
-            elif atom_type == "P":
+            elif main_type == "P":
                 atom_type = _predicate_type_and_subtype(token)
-            elif atom_type == "M":
+            elif main_type == "M":
                 atom_type = _modifier_type_and_subtype(token)
-            elif atom_type == "B":
+            elif main_type == "B":
                 atom_type = "Bx"
-            elif atom_type == "T":
+            elif main_type == "T":
                 atom_type = _trigger_type_and_subtype(token)
-            elif atom_type == "J":
+            elif main_type == "J":
                 atom_type = "Jx"
 
         text: str = token.text.lower()
