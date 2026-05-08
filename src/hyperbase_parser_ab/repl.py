@@ -129,6 +129,7 @@ def _iteration_panel(it: RuleIteration) -> Panel:
     candidates_table = Table(box=box.SIMPLE, padding=(0, 1), show_header=True)
     candidates_table.add_column("rule", style="white")
     candidates_table.add_column("pos", style="dim", justify="right")
+    candidates_table.add_column("badness", style="dim", justify="right")
     candidates_table.add_column("score", style="dim", justify="right")
     candidates_table.add_column("new edge", style="white")
 
@@ -139,12 +140,13 @@ def _iteration_panel(it: RuleIteration) -> Panel:
             candidates_table.add_row(
                 Text(f"{marker}{cand.rule_repr}", style=style),
                 Text(str(cand.pos), style=style),
+                Text(str(cand.badness), style=style),
                 Text(str(cand.score), style=style),
                 Text(cand.new_edge_repr, style=style),
             )
     else:
         candidates_table.add_row(
-            Text("(no candidates)", style="dim italic"), "", "", ""
+            Text("(no candidates)", style="dim italic"), "", "", "", ""
         )
 
     body: list[object] = [seq_text, candidates_table]
@@ -169,6 +171,25 @@ def _iteration_panel(it: RuleIteration) -> Panel:
         else f"[bold yellow]Iteration {it.iteration} (fallback)[/bold yellow]"
     )
     return Panel(Group(*body), title=title, border_style=border, box=box.ROUNDED)
+
+
+def _final_badness_panel(trace: ParseTrace) -> Panel | None:
+    if not trace.final_badness:
+        return None
+    table = Table(box=box.SIMPLE, padding=(0, 1), show_header=True)
+    table.add_column("location", style="white")
+    table.add_column("severity", style="dim", justify="right")
+    table.add_column("type", style="yellow")
+    table.add_column("message", style="white")
+    for location, issues in trace.final_badness.items():
+        for err_type, message, severity in issues:
+            table.add_row(location, str(severity), err_type, message)
+    return Panel(
+        table,
+        title="[bold red]Final badness[/bold red]",
+        border_style="red",
+        box=box.ROUNDED,
+    )
 
 
 def _post_processing_panel(trace: ParseTrace) -> Panel | None:
@@ -209,6 +230,10 @@ def _make_report_hook(parser: AlphaBetaParser) -> PreResultHook:
         post_panel = _post_processing_panel(trace)
         if post_panel is not None:
             console.print(post_panel)
+
+        final_badness_panel = _final_badness_panel(trace)
+        if final_badness_panel is not None:
+            console.print(final_badness_panel)
 
     return hook
 

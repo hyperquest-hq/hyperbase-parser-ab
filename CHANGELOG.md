@@ -4,6 +4,7 @@
 
 ### Added
 
+- Beam search.
 - Atom classifier fixed cases.
 - Parse trace reports in the repl.
 - use_atomizer_subtype option (defaults to True).

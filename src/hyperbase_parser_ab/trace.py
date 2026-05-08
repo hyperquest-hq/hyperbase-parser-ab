@@ -30,6 +30,7 @@ class RuleCandidate:
     pos: int
     score: int
     new_edge_repr: str
+    badness: int = 0
     is_winner: bool = False
 
 
@@ -47,6 +48,7 @@ class ParseTrace:
     atoms: list[AtomTrace] = field(default_factory=list)
     iterations: list[RuleIteration] = field(default_factory=list)
     post_processing: list[tuple[str, str]] = field(default_factory=list)
+    final_badness: dict[str, list[tuple[str, str, int]]] = field(default_factory=dict)
 
 
 def rule_repr(rule: Rule, index: int) -> str:

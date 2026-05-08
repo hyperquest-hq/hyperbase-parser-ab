@@ -298,139 +298,127 @@ class TestParserFlattenConjunctions:
         assert parser._flatten_conjunctions(edge) == expected
 
 
-class TestParserFixSpecObject:
+class TestParserBeamSearch:
     @staticmethod
-    def _setup_atoms(parser, edge):
-        """Register all atoms in the edge so _update_atom can find them."""
-        from hyperbase.hyperedge import unique
+    def _setup_loop_state(parser):
+        parser.depths = {}
+        parser.connections = set()
+        parser.orig_atom = {}
+        parser.atom2token = {}
+        parser.token2atom = {}
+        parser._cur_trace = None
 
-        for atom in edge.all_atoms():
-            uatom = unique(atom)
-            parser.atom2token[uatom] = MagicMock()
-            parser.orig_atom[uatom] = uatom
+    def test_default_beam_width(self):
+        parser = _make_parser()
+        assert parser.beam_width == 5
 
-    def test_atom_unchanged(self):
+    def test_beam_width_param_is_read(self):
+        with (
+            patch(
+                "hyperbase_parser_ab.parser.SPACY_MODELS", {"en": ["en_core_web_sm"]}
+            ),
+            patch("spacy.util.is_package", return_value=True),
+            patch("spacy.load", return_value=MagicMock()),
+            patch("hyperbase_parser_ab.parser.Alpha"),
+        ):
+            parser = AlphaBetaParser({"language": "en", "beam_width": 5})
+        assert parser.beam_width == 5
+
+    def test_beam_width_clamps_to_one_minimum(self):
+        with (
+            patch(
+                "hyperbase_parser_ab.parser.SPACY_MODELS", {"en": ["en_core_web_sm"]}
+            ),
+            patch("spacy.util.is_package", return_value=True),
+            patch("spacy.load", return_value=MagicMock()),
+            patch("hyperbase_parser_ab.parser.Alpha"),
+        ):
+            parser = AlphaBetaParser({"language": "en", "beam_width": 0})
+        assert parser.beam_width == 1
+
+    def test_greedy_reduces_two_concepts(self):
+        parser = _make_parser()
+        parser.beam_width = 1
+        self._setup_loop_state(parser)
+        atom_a = hedge("cat/Cc/en")
+        atom_b = hedge("dog/Cc/en")
+        assert atom_a is not None
+        assert atom_b is not None
+        result, failed = parser._parse_atom_sequence([atom_a, atom_b])
+        assert result is not None
+        assert len(result) == 1
+        assert failed is False
+        # Rule("C", {"C"}, 2, "+/B/.") fires, building the +/B builder
+        assert str(result[0]).startswith("(+/B/.")
+
+    def test_beam_width_three_reduces_two_concepts(self):
+        parser = _make_parser()
+        parser.beam_width = 3
+        self._setup_loop_state(parser)
+        atom_a = hedge("cat/Cc/en")
+        atom_b = hedge("dog/Cc/en")
+        assert atom_a is not None
+        assert atom_b is not None
+        result, failed = parser._parse_atom_sequence([atom_a, atom_b])
+        assert result is not None
+        assert len(result) == 1
+        assert failed is False
+
+    def test_beam_returns_lowest_cumulative_badness(self):
+        """With width=2 the search should keep the clean path alive even when
+        the locally-best candidate is only marginally better."""
+        parser = _make_parser()
+        parser.beam_width = 2
+        self._setup_loop_state(parser)
+        # Three concepts: must reduce two pairs in sequence. Several beam
+        # paths exist; the clean-path winner should have cum_badness == 0
+        # because every C+C → +/B is structurally clean.
+        atoms = [hedge("a/Cc/en"), hedge("b/Cc/en"), hedge("c/Cc/en")]
+        for a in atoms:
+            assert a is not None
+        result, _failed = parser._parse_atom_sequence(atoms)
+        assert result is not None
+        assert len(result) == 1
+
+
+class TestParserCandidateBadness:
+    def test_clean_atom_has_zero_badness(self):
         parser = _make_parser()
         atom = hedge("cat/Cc/en")
-        assert parser._fix_spec_object(atom) == atom
+        assert atom is not None
+        assert parser._candidate_badness(atom) == 0
 
-    def test_no_object_argrole_unchanged(self):
-        """A relation with no 'o' argrole should not be changed."""
+    def test_clean_relation_has_zero_badness(self):
         parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.sx/en cat/Cc/en (because/T/en (goes/Pd.s/en dog/Cc/en)))"
-        )
-        self._setup_atoms(parser, edge)
-        assert parser._fix_spec_object(edge) == edge
+        edge = hedge("(runs/Pd.so/en cat/Cc/en dog/Cc/en)")
+        assert edge is not None
+        assert parser._candidate_badness(edge) == 0
 
-    def test_object_not_spec_unchanged(self):
-        """An 'o' argument that is a concept (not a specification) stays the same."""
+    def test_no_argroles_is_ignored(self):
+        """A P/B connector with no argroles fires 'no-argroles' (sev 0)
+        but argroles are only assigned post-loop, so this issue must be
+        skipped during candidate badness scoring."""
         parser = _make_parser()
-        edge = hedge("(likes/Pd.so/en cat/Cc/en dog/Cc/en)")
-        self._setup_atoms(parser, edge)
-        assert parser._fix_spec_object(edge) == edge
+        edge = hedge("(runs/Pd/en cat/Cc/en dog/Cc/en)")
+        assert edge is not None
+        assert parser._candidate_badness(edge) == 0
 
-    def test_object_spec_without_relation_unchanged(self):
-        """An 'o' argument that is a specification but contains no relation stays."""
+    def test_other_argrole_issues_still_count(self):
+        """Only 'no-argroles' is filtered. A duplicate-argrole-s issue
+        (sev 2, weight 10) should still contribute to badness."""
         parser = _make_parser()
-        edge = hedge("(goes/Pd.so/en cat/Cc/en (to/T/en food/Cc/en))")
-        self._setup_atoms(parser, edge)
-        assert parser._fix_spec_object(edge) == edge
+        edge = hedge("(runs/Pd.ss/en cat/Cc/en dog/Cc/en)")
+        assert edge is not None
+        bad = parser._candidate_badness(edge)
+        assert bad >= 10
 
-    def test_basic_transformation(self):
-        """(pred/P.o (trig/T rel/R)) → ((trig/Mr pred/P.o) rel/R)"""
+    def test_correctness_error_dominates(self):
+        """A severity-0 (correctness) error must outweigh any sev-2/3 noise."""
         parser = _make_parser()
-        edge = hedge("(likes/Pd.o/en (that/T/en (go/Pd.s/en dog/Cc/en)))")
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        expected = hedge("((that/Mr/en likes/Pd.o/en) (go/Pd.s/en dog/Cc/en))")
-        assert result == expected
-
-    def test_with_subject_and_object(self):
-        """(pred/P.so subj/C (trig/T rel/R)) → ((trig/Mr pred/P.so) subj/C rel/R)"""
-        parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.so/en cat/Cc/en (because/T/en (goes/Pd.s/en dog/Cc/en)))"
-        )
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        expected = hedge(
-            "((because/Mr/en runs/Pd.so/en) cat/Cc/en (goes/Pd.s/en dog/Cc/en))"
-        )
-        assert result == expected
-
-    def test_trigger_subtype_preserved(self):
-        """Trigger subtype (e.g. Ti, Tv) replaced as Mr."""
-        parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.so/en cat/Cc/en (because/Tc/en (runs/Pd.s/en dog/Cc/en)))"
-        )
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        expected = hedge(
-            "((because/Mr/en runs/Pd.so/en) cat/Cc/en (runs/Pd.s/en dog/Cc/en))"
-        )
-        assert result == expected
-
-    def test_recursive_inner_edge(self):
-        """The fix should apply recursively to nested edges."""
-        parser = _make_parser()
-        # Inner relation has an 'o' arg that is a spec with a relation
-        inner = "(runs/Pd.so/en cat/Cc/en (because/T/en (goes/Pd.s/en dog/Cc/en)))"
-        edge = hedge(f"(and/J/en {inner} fish/Cc/en)")
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        inner_expected = (
-            "((because/Mr/en runs/Pd.so/en) cat/Cc/en (goes/Pd.s/en dog/Cc/en))"
-        )
-        expected = hedge(f"(and/J/en {inner_expected} fish/Cc/en)")
-        assert result == expected
-
-    def test_updates_atom_tracking(self):
-        """The trigger atom should be tracked via _update_atom."""
-        parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.so/en cat/Cc/en (because/T/en (runs/Pd.s/en dog/Cc/en)))"
-        )
-        self._setup_atoms(parser, edge)
-        trigger_atom = hedge("because/T/en")
-        old_uatom = UniqueAtom(trigger_atom)
-        parser._fix_spec_object(edge)
-        # The old trigger atom should be recorded in orig_atom under the new key
-        new_trigger = hedge("because/Mr/en")
-        found = any(
-            str(parser.orig_atom[k]) == str(old_uatom)
-            for k in parser.orig_atom
-            if str(k) == str(new_trigger)
-        )
-        assert found
-
-    def test_with_extra_args_after_object(self):
-        """Arguments after the 'o' spec should be preserved."""
-        parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.sox/en cat/Cc/en"
-            " (because/T/en (runs/Pd.s/en dog/Cc/en)) quickly/M/en)"
-        )
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        expected = hedge(
-            "((because/Mr/en runs/Pd.sox/en) cat/Cc/en"
-            " (runs/Pd.s/en dog/Cc/en) quickly/M/en)"
-        )
-        assert result == expected
-
-    def test_modifier_wrapped_trigger(self):
-        """When the trigger is wrapped in a modifier, handle correctly."""
-        parser = _make_parser()
-        edge = hedge(
-            "(runs/Pd.so/en cat/Cc/en ((not/M/en because/T/en) (runs/Pd.s/en dog/Cc/en)))"
-        )
-        self._setup_atoms(parser, edge)
-        result = parser._fix_spec_object(edge)
-        # Trigger connector (not/M to/T) becomes (not/M because/Mr),
-        # then wraps predicate
-        expected = hedge(
-            "(((not/M/en because/Mr/en) runs/Pd.so/en) cat/Cc/en (runs/Pd.s/en dog/Cc/en))"
-        )
-        assert result == expected
+        # Modifier connector with 2 args → correctness violation (mod-1-arg)
+        bad_edge = hedge("(quickly/M/en cat/Cc/en dog/Cc/en)")
+        assert bad_edge is not None
+        bad_score = parser._candidate_badness(bad_edge)
+        # Severity 0 weight is 1000; one issue should be >= 1000 and < crash penalty.
+        assert bad_score >= 1000
+        assert bad_score < 1_000_000

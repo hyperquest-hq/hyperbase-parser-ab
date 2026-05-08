@@ -1,5 +1,6 @@
 import re
 import traceback
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spacy
@@ -12,13 +13,14 @@ from hyperbase.hyperedge import (
     unique,
 )
 from hyperbase.parsers import Parser, ParseResult
+from hyperbase.parsers.badness import badness_check, check_structural_quality
 from hyperbase.parsers.utils import edge_depth_exceeds
 from spacy.language import Language
 from spacy.tokens import Doc, Span, Token
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import SPACY_MODELS
-from hyperbase_parser_ab.rules import RULES, Rule, apply_rule
+from hyperbase_parser_ab.rules import RULES, apply_rule
 from hyperbase_parser_ab.trace import (
     AtomTrace,
     ParseTrace,
@@ -79,6 +81,19 @@ def _trigger_type_and_subtype(token: Token) -> str:
 
 def _is_verb(token: Token) -> bool:
     return token.pos_ == "VERB"
+
+
+_BADNESS_WEIGHTS: dict[int, int] = {0: 1000, 1: 100, 2: 10, 3: 1}
+_BADNESS_CRASH_PENALTY: int = 1_000_000
+
+
+@dataclass
+class _Beam:
+    sequence: list[Hyperedge]
+    cum_badness: int
+    cum_score: int
+    iterations: list[RuleIteration] = field(default_factory=list)
+    failed: bool = False
 
 
 def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -> str:
@@ -143,6 +158,17 @@ class AlphaBetaParser(Parser):
                 "required": False,
                 "is_path": True,
             },
+            "beam_width": {
+                "type": int,
+                "default": 5,
+                "description": (
+                    "Beam search width for the reduction loop. 1 (default) "
+                    "is greedy. Higher values keep multiple parse hypotheses "
+                    "alive in parallel and pick the lowest-cumulative-badness "
+                    "one at the end (tie-broken by cumulative score)."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -158,6 +184,7 @@ class AlphaBetaParser(Parser):
         self.atom_lang: str = self.lang if lang_namespace else ""
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
+        self.beam_width: int = max(1, int(self.params.get("beam_width", 5)))
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -281,6 +308,17 @@ class AlphaBetaParser(Parser):
                     self._cur_trace.post_processing.append(("post_process", str(edge)))
                 if edge is not None:
                     atom2word = self._generate_atom2word(edge, offset=offset)
+                    if self._cur_trace is not None:
+                        try:
+                            raw_final_badness = badness_check(
+                                edge, [token.text for token in sent]
+                            )
+                            self._cur_trace.final_badness = {
+                                (k if isinstance(k, str) else str(k)): v
+                                for k, v in raw_final_badness.items()
+                            }
+                        except Exception:
+                            self._cur_trace.final_badness = {}
 
             if edge is None:
                 return None
@@ -360,29 +398,6 @@ class AlphaBetaParser(Parser):
             return "x"
         else:
             return "?"
-
-    def _adjust_score(self, edges: list[Hyperedge]) -> int:
-        min_depth: int = 9999999
-        appos: bool = False
-        min_appos_depth: int = 9999999
-
-        if all(edge.mtype() == "C" for edge in edges):
-            for edge in edges:
-                token: Token | None = self._head_token(edge)
-                if token is None:
-                    continue
-                depth: int = self.depths[self.token2atom[token]]
-                if depth < min_depth:
-                    min_depth = depth
-                if token.dep_ == "appos":
-                    appos = True
-                    if depth < min_appos_depth:
-                        min_appos_depth = depth
-
-        if appos and min_appos_depth > min_depth:
-            return -99
-        else:
-            return 0
 
     def _head_token(self, edge: Hyperedge) -> Token | None:
         atoms: list[Atom] = [
@@ -521,10 +536,10 @@ class AlphaBetaParser(Parser):
                 self.orig_atom[unew_builder] = ubuilder
                 new_entity = edge.replace_atom(builder, new_builder, unique=True)
 
-        new_args: list[Hyperedge] = [
-            self._apply_arg_roles(subentity) for subentity in new_entity[1:]
+        new_subedges: list[Hyperedge] = [
+            self._apply_arg_roles(sub) for sub in new_entity
         ]
-        new_entity = hedge([new_entity[0], *new_args])
+        new_entity = hedge(new_subedges)
 
         return new_entity
 
@@ -675,95 +690,215 @@ class AlphaBetaParser(Parser):
                 conn = True
                 break
 
-        mdepth: int = 99999999
+        mdepth: int = 9999999
+        n: int = 0
         for atom_set in atom_sets:
             for atom in atom_set:
                 if atom in self.orig_atom:
                     oatom: Atom = self.orig_atom[atom]
                     if oatom in self.depths:
+                        n += 1
                         depth: int = self.depths[oatom]
                         if depth < mdepth:
                             mdepth = depth
 
-        return (10000000 if conn else 0) + (mdepth * 100)  # + self._adjust_score(edges)
+        return (10000000 if conn else 0) + (mdepth * 100) + n
+
+    def _candidate_token_atoms(self, edge: Hyperedge) -> frozenset[Atom]:
+        return frozenset(a for a in edge.all_atoms() if a in self.orig_atom)
+
+    def _window_connected(self, edges: list[Hyperedge]) -> bool:
+        atom_sets: list[list[Atom]] = [e.all_atoms() for e in edges]
+        return any(self._are_connected(atom_sets, p) for p in range(len(edges)))
+
+    def _is_relcl_constraint_satisfied(self, new_edge: Hyperedge) -> bool:
+        # If the connector P-atom corresponds to a token with dep_='acl:relcl',
+        # every token-derived atom in new_edge must come from a dep-descendant
+        # of that token (or be the token itself).
+        if new_edge.connector_mtype() != "P":
+            return True
+        pred_atom: Atom | None = new_edge.atom_with_type("P")
+        if pred_atom is None:
+            return True
+        pred_token: Token | None = self.atom2token.get(pred_atom)
+        if pred_token is None or pred_token.dep_ != "acl:relcl":
+            return True
+        allowed_tokens: set[Token] = set(pred_token.subtree)
+        for atom in new_edge.all_atoms():
+            token: Token | None = self.atom2token.get(atom)
+            if token is not None and token not in allowed_tokens:
+                return False
+        return True
+
+    def _candidate_badness(self, edge: Hyperedge) -> int:
+        # 'no-argroles' is skipped: argroles are only assigned by
+        # _apply_arg_roles after the reduction loop, so every P/B
+        # connector trivially fires it mid-loop.
+        total: int = 0
+        try:
+            for issues in edge.check_correctness().values():
+                for err_type, _msg in issues:
+                    if err_type == "no-argroles":
+                        continue
+                    total += _BADNESS_WEIGHTS[0]
+            for issues in check_structural_quality(edge).values():
+                for _err_type, _msg, severity in issues:
+                    total += _BADNESS_WEIGHTS.get(severity, 0)
+        except Exception:
+            return _BADNESS_CRASH_PENALTY
+        return total
+
+    def _expand_beam(self, beam: _Beam) -> list[_Beam]:
+        base_iter: RuleIteration = RuleIteration(
+            iteration=len(beam.iterations),
+            sequence_repr=[str(e) for e in beam.sequence],
+        )
+        # Parallel lists kept in lockstep until the dominance filter.
+        # Per-candidate tuple: (score, new_edge, window_start, pos, badness)
+        cand_actions: list[tuple[int, Hyperedge, int, int, int]] = []
+        cand_records: list[RuleCandidate] = []
+        cand_tokens: list[frozenset[Atom]] = []
+        cand_conn: list[bool] = []
+        cand_can_dominate: list[bool] = []
+
+        for rule_number, rule in enumerate(RULES):
+            window_start: int = rule.size - 1
+            for pos in range(window_start, len(beam.sequence)):
+                new_edge: Hyperedge | None = apply_rule(rule, beam.sequence, pos)
+                if new_edge and self._is_relcl_constraint_satisfied(new_edge):
+                    window: list[Hyperedge] = beam.sequence[
+                        pos - window_start : pos + 1
+                    ]
+                    score: int = self._score(window)
+                    bad: int = self._candidate_badness(new_edge)
+                    cand_records.append(
+                        RuleCandidate(
+                            rule_index=rule_number,
+                            rule_repr=rule_repr(rule, rule_number),
+                            pos=pos,
+                            score=score,
+                            new_edge_repr=str(new_edge),
+                            badness=bad,
+                        )
+                    )
+                    cand_actions.append((score, new_edge, window_start, pos, bad))
+                    cand_tokens.append(self._candidate_token_atoms(new_edge))
+                    cand_conn.append(self._window_connected(window))
+                    cand_can_dominate.append(rule.can_dominate)
+                else:
+                    base_iter.rejections.append((rule_number, pos))
+
+        # Drop A if there exists B != A with A's token-atoms a strict subset
+        # of B's AND both with the same connectivity status. Only candidates
+        # whose rule has can_dominate=True can act as the dominator B.
+        n: int = len(cand_actions)
+        keep: list[bool] = [True] * n
+        for i in range(n):
+            for j in range(n):
+                if i == j or not cand_can_dominate[j]:
+                    continue
+                if cand_conn[i] == cand_conn[j] and cand_tokens[i] < cand_tokens[j]:
+                    keep[i] = False
+                    break
+        cand_actions = [cand_actions[i] for i in range(n) if keep[i]]
+        base_iter.candidates = [cand_records[i] for i in range(n) if keep[i]]
+
+        if not cand_actions:
+            base_iter.fallback_used = True
+            if len(beam.sequence) > 0:
+                fallback: Hyperedge = hedge([":/J/.", *beam.sequence[:2]])
+                new_sequence: list[Hyperedge] = (
+                    [fallback] if fallback else []
+                ) + beam.sequence[2:]
+            else:
+                new_sequence = []
+            return [
+                _Beam(
+                    sequence=new_sequence,
+                    cum_badness=beam.cum_badness + _BADNESS_CRASH_PENALTY,
+                    cum_score=beam.cum_score,
+                    iterations=[*beam.iterations, base_iter],
+                    failed=True,
+                )
+            ]
+
+        # Pick top-k actions from this beam by (badness ASC, score DESC) so
+        # one beam can't fan out beyond beam_width children.
+        indexed: list[tuple[int, tuple[int, Hyperedge, int, int, int]]] = list(
+            enumerate(cand_actions)
+        )
+        indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
+        top = indexed[: self.beam_width]
+
+        extensions: list[_Beam] = []
+        for cand_idx, (score, new_edge, window_start, pos, bad) in top:
+            iter_for_child: RuleIteration = RuleIteration(
+                iteration=base_iter.iteration,
+                sequence_repr=base_iter.sequence_repr,
+                candidates=[
+                    RuleCandidate(
+                        rule_index=c.rule_index,
+                        rule_repr=c.rule_repr,
+                        pos=c.pos,
+                        score=c.score,
+                        new_edge_repr=c.new_edge_repr,
+                        badness=c.badness,
+                        is_winner=(i == cand_idx),
+                    )
+                    for i, c in enumerate(base_iter.candidates)
+                ],
+                rejections=list(base_iter.rejections),
+                fallback_used=False,
+            )
+            new_sequence = [
+                *beam.sequence[: pos - window_start],
+                new_edge,
+                *beam.sequence[pos + 1 :],
+            ]
+            extensions.append(
+                _Beam(
+                    sequence=new_sequence,
+                    cum_badness=beam.cum_badness + bad,
+                    cum_score=beam.cum_score + score,
+                    iterations=[*beam.iterations, iter_for_child],
+                    failed=beam.failed,
+                )
+            )
+        return extensions
 
     def _parse_atom_sequence(
         self, atom_sequence: list[Atom]
     ) -> tuple[list[Hyperedge] | None, bool]:
-        sequence: list[Hyperedge] = list(atom_sequence)
-        while True:
-            iteration: RuleIteration | None = None
-            if self._cur_trace is not None:
-                iteration = RuleIteration(
-                    iteration=len(self._cur_trace.iterations),
-                    sequence_repr=[str(e) for e in sequence],
-                )
+        beams: list[_Beam] = [
+            _Beam(
+                sequence=list(atom_sequence),
+                cum_badness=0,
+                cum_score=0,
+            )
+        ]
 
-            action: tuple[Rule, int, Hyperedge, int, int] | None = None
-            best_score: int = -999999999
-            for rule_number, rule in enumerate(RULES):
-                window_start: int = rule.size - 1
-                for pos in range(window_start, len(sequence)):
-                    new_edge: Hyperedge | None = apply_rule(rule, sequence, pos)
-                    if new_edge:
-                        score: int = self._score(sequence[pos - window_start : pos + 1])
-                        # score -= rule_number
-                        if iteration is not None:
-                            iteration.candidates.append(
-                                RuleCandidate(
-                                    rule_index=rule_number,
-                                    rule_repr=rule_repr(rule, rule_number),
-                                    pos=pos,
-                                    score=score,
-                                    new_edge_repr=str(new_edge),
-                                )
-                            )
-                        if score > best_score:
-                            action = (rule, score, new_edge, window_start, pos)
-                            best_score = score
-                    elif iteration is not None:
-                        iteration.rejections.append((rule_number, pos))
-
-            # parse failed, make best effort to return something
-            if action is None:
-                if iteration is not None:
-                    iteration.fallback_used = True
-                # if all else fails...
-                if len(sequence) > 0:
-                    fallback: Hyperedge = hedge([":/J/.", *sequence[:2]])
-                    new_sequence: list[Hyperedge] = (
-                        [fallback] if fallback else []
-                    ) + sequence[2:]
+        while not all(len(b.sequence) < 2 for b in beams):
+            next_beams: list[_Beam] = []
+            for beam in beams:
+                if len(beam.sequence) < 2:
+                    next_beams.append(beam)
                 else:
-                    if iteration is not None and self._cur_trace is not None:
-                        self._cur_trace.iterations.append(iteration)
-                    return None, True
-            else:
-                rule, _, new_edge, window_start, pos = action
-                new_sequence = [
-                    *sequence[: pos - window_start],
-                    new_edge,
-                    *sequence[pos + 1 :],
-                ]
+                    next_beams.extend(self._expand_beam(beam))
+            next_beams.sort(key=lambda b: (b.cum_badness, -b.cum_score))
+            beams = next_beams[: self.beam_width]
 
-                if iteration is not None:
-                    winning_rule_index: int = RULES.index(rule)
-                    for cand in iteration.candidates:
-                        if cand.rule_index == winning_rule_index and cand.pos == pos:
-                            cand.is_winner = True
-                            break
+        best: _Beam = beams[0]
 
-                self.debug_msg(f"rule: {rule}")
-                self.debug_msg(f"score: {score}")
-                self.debug_msg(f"new_edge: {new_edge}")
-                self.debug_msg(f"new_sequence: {new_sequence}")
+        if self._cur_trace is not None:
+            self._cur_trace.iterations.extend(best.iterations)
 
-            if iteration is not None and self._cur_trace is not None:
-                self._cur_trace.iterations.append(iteration)
+        self.debug_msg(f"Final beam sequence: {best.sequence}")
+        self.debug_msg(f"Cumulative badness: {best.cum_badness}")
+        self.debug_msg(f"Cumulative score: {best.cum_score}")
 
-            sequence = new_sequence
-            if len(sequence) < 2:
-                return sequence, False
+        if not best.sequence and best.failed:
+            return None, True
+        return best.sequence, best.failed
 
     def get_sentences(self, text: str) -> list[str]:
         if self.nlp:
@@ -852,52 +987,6 @@ class AlphaBetaParser(Parser):
             return self._replace_argroles(edge, _ars)
         return edge
 
-    def _fix_spec_object(self, edge: Hyperedge) -> Hyperedge:
-        if edge.atom:
-            return edge
-        new_edge: Hyperedge = hedge(
-            [self._fix_spec_object(subedge) for subedge in edge]
-        )
-        if new_edge is None:
-            return edge
-        edge = new_edge
-
-        ars: str = edge.argroles()
-        if edge.mt != "R" or "o" not in ars:
-            return edge
-
-        for i, ar in enumerate(ars):
-            if ar == "o":
-                arg: Hyperedge = edge[i + 1]
-                if (
-                    arg.not_atom
-                    and arg.mt == "S"
-                    and any(subedge.mt == "R" for subedge in arg[1:])
-                ):
-                    # Get trigger and change type from T to M
-                    trigger: Hyperedge = arg[0]
-                    trigger_atom: Atom = trigger.inner_atom()
-                    new_mod_atom: Atom = trigger_atom.replace_atom_part(1, "Mr")
-                    self._update_atom(trigger_atom, new_mod_atom)
-
-                    if trigger.atom:
-                        new_mod: Hyperedge = new_mod_atom
-                    else:
-                        new_mod = trigger.replace_atom(
-                            trigger_atom, new_mod_atom, unique=True
-                        )
-
-                    # Wrap predicate connector with modifier
-                    new_connector: Hyperedge = hedge((new_mod, edge[0]))
-
-                    # Replace specification with its arguments
-                    new_args: list[Hyperedge] = (
-                        list(edge[1 : i + 1]) + list(arg[1:]) + list(edge[i + 2 :])
-                    )
-                    return hedge([new_connector, *new_args])
-
-        return edge
-
     def _flatten_conjunctions(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
@@ -926,7 +1015,6 @@ class AlphaBetaParser(Parser):
         if edge is None:
             return None
         _edge: Hyperedge = self._fix_argroles(edge)
-        _edge = self._fix_spec_object(_edge)
         _edge = self._process_colon_conjunctions(_edge)
         _edge = self._flatten_conjunctions(_edge)
         return _edge

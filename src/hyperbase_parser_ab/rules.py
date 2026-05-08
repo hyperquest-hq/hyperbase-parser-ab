@@ -9,11 +9,13 @@ class Rule:
         arg_types: set[str],
         size: int,
         connector: str | None = None,
+        can_dominate: bool = True,
     ) -> None:
         self.first_type: str = first_type
         self.arg_types: set[str] = arg_types
         self.size: int = size
         self.connector: str | None = connector
+        self.can_dominate: bool = can_dominate
         self._branches: int = 0
 
 
@@ -28,8 +30,8 @@ RULES: list[Rule] = [
     Rule("P", {"C", "R", "S"}, 4),
     Rule("P", {"C", "R", "S"}, 3),
     Rule("P", {"C", "R", "S"}, 2),
-    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3),
-    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
+    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3, can_dominate=False),
+    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2, can_dominate=False),
 ]
 
 
