@@ -1,10 +1,12 @@
 import heapq
 import math
+import multiprocessing as mp
 import re
 import sys
 import time
 import traceback
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -204,6 +206,19 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
+            "n_workers": {
+                "type": int,
+                "default": 1,
+                "description": (
+                    "Number of worker processes for batch parsing. 1 "
+                    "(default) runs everything in the calling process. "
+                    "Higher values shard each parse_batch call across that "
+                    "many spawned workers, each with its own spaCy + "
+                    "atomizer instance. Use to actually utilize multiple "
+                    "CPU cores when parsing large corpora."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -224,6 +239,8 @@ class AlphaBetaParser(Parser):
         self.exact_search_timeout: float = float(
             self.params.get("exact_search_timeout", 30.0)
         )
+        self.n_workers: int = max(1, int(self.params.get("n_workers", 1)))
+        self._worker_pool: ProcessPoolExecutor | None = None
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -301,8 +318,119 @@ class AlphaBetaParser(Parser):
         else:
             raise RuntimeError("spaCy model failed to initialize.")
 
+    def parse_batch(self, sentences: list[str]) -> list[list[ParseResult]]:
+        """Parse multiple sentences with shared spaCy + atomizer passes.
+
+        spaCy runs as a single ``nlp.pipe`` over the whole batch, the
+        atomizer runs as a single padded forward pass, and the
+        per-sentence beam search is then optionally sharded across
+        ``n_workers`` processes. Falls back to the base-class
+        sentence-by-sentence loop if input is empty."""
+        if not sentences:
+            return []
+        if self.n_workers > 1 and len(sentences) > 1:
+            return self._parse_batch_parallel(sentences)
+        return self._parse_batch_inproc(sentences)
+
+    def _parse_batch_inproc(self, sentences: list[str]) -> list[list[ParseResult]]:
+        if self.nlp is None:
+            raise RuntimeError("spaCy model failed to initialize.")
+
+        normalized: list[str] = [re.sub(r"\s+", " ", s).strip() for s in sentences]
+
+        # Single nlp.pipe call replaces N self.nlp() invocations.
+        docs: list[Doc] = list(self.nlp.pipe(normalized))
+
+        # Flatten input -> sub-sentences, preserving offsets and the
+        # parent input index so we can regroup results at the end.
+        flat: list[tuple[int, Span, int]] = []
+        for input_idx, doc in enumerate(docs):
+            offset: int = 0
+            for sent in doc.sents:
+                flat.append((input_idx, sent, offset))
+                offset += len(sent)
+
+        results_per_input: list[list[ParseResult]] = [[] for _ in sentences]
+        if not flat:
+            return results_per_input
+
+        spans: list[Span] = [s for _, s, _ in flat]
+        features_list: list[list[tuple[str, str, str, str, str]]] = [
+            self._token_features(s) for s in spans
+        ]
+
+        assert self.alpha is not None, "Alpha must be initialized before parsing"
+        # One batched atomizer forward pass for every sub-sentence.
+        predictions = self.alpha.predict_batch(spans, features_list)
+
+        cur_input_idx: int = -1
+        for (input_idx, sent, sent_offset), pred in zip(flat, predictions, strict=True):
+            # Match parse_sentence semantics: orig_atom is reset once
+            # per input string, then accumulates across that string's
+            # sub-sentences.
+            if input_idx != cur_input_idx:
+                self.orig_atom = {}
+                self.doc = docs[input_idx]
+                cur_input_idx = input_idx
+            try:
+                parse = self.parse_spacy_sentence(
+                    sent, offset=sent_offset, prediction=pred
+                )
+            except RuntimeError as error:
+                print(error)
+                parse = None
+            if parse:
+                results_per_input[input_idx].append(parse)
+        return results_per_input
+
+    def _ensure_worker_pool(self) -> ProcessPoolExecutor:
+        if self._worker_pool is None:
+            ctx = mp.get_context("spawn")
+            self._worker_pool = ProcessPoolExecutor(
+                max_workers=self.n_workers,
+                mp_context=ctx,
+                initializer=_worker_init,
+                initargs=(self.params,),
+            )
+        return self._worker_pool
+
+    def _parse_batch_parallel(self, sentences: list[str]) -> list[list[ParseResult]]:
+        pool = self._ensure_worker_pool()
+        n: int = len(sentences)
+        n_workers: int = min(self.n_workers, n)
+        # Even contiguous shards: every worker gets ceil(n/k) or
+        # floor(n/k) sentences. Each shard is large enough for the
+        # in-worker batched spaCy + atomizer passes to amortize.
+        chunk_size: int = (n + n_workers - 1) // n_workers
+        chunks: list[list[str]] = [
+            sentences[i : i + chunk_size] for i in range(0, n, chunk_size)
+        ]
+        chunk_results: list[list[list[ParseResult]]] = list(
+            pool.map(_worker_parse_chunk, chunks)
+        )
+        # Flatten back in submission order.
+        out: list[list[ParseResult]] = []
+        for cr in chunk_results:
+            out.extend(cr)
+        return out
+
+    def close(self) -> None:
+        """Shut down the worker pool, if one was started. Idempotent.
+
+        Not called from ``__del__``; ``ProcessPoolExecutor`` registers
+        its own atexit hook that handles interpreter shutdown, and
+        racing it from a finalizer leads to spurious crashes."""
+        if self._worker_pool is not None:
+            self._worker_pool.shutdown(wait=True)
+            self._worker_pool = None
+
     def parse_spacy_sentence(
-        self, sent: Span, atom_sequence: list[Atom] | None = None, offset: int = 0
+        self,
+        sent: Span,
+        atom_sequence: list[Atom] | None = None,
+        offset: int = 0,
+        prediction: tuple[tuple[str, ...] | list[str], list[list[tuple[str, float]]]]
+        | None = None,
     ) -> ParseResult | None:
         try:
             self._cur_trace = ParseTrace() if self._report_enabled() else None
@@ -310,7 +438,9 @@ class AlphaBetaParser(Parser):
             atom_sequences: list[list[Atom]]
             sequence_traces: list[list[AtomTrace]]
             if atom_sequence is None:
-                atom_sequences, sequence_traces = self._build_atom_sequences(sent)
+                atom_sequences, sequence_traces = self._build_atom_sequences(
+                    sent, prediction=prediction
+                )
             else:
                 atom_sequences = [atom_sequence]
                 sequence_traces = [[]]
@@ -700,9 +830,10 @@ class AlphaBetaParser(Parser):
 
         return results
 
-    def _build_atom_sequences(
-        self, sentence: Span
-    ) -> tuple[list[list[Atom]], list[list[AtomTrace]]]:
+    @staticmethod
+    def _token_features(
+        sentence: Span,
+    ) -> list[tuple[str, str, str, str, str]]:
         features: list[tuple[str, str, str, str, str]] = []
         for pos, token in enumerate(sentence):
             head: Token = token.head
@@ -715,11 +846,24 @@ class AlphaBetaParser(Parser):
             else:
                 pos_after = ""
             features.append((tag, dep, hpos, hdep, pos_after))
+        return features
 
-        assert self.alpha is not None, "Alpha must be initialized before parsing"
+    def _build_atom_sequences(
+        self,
+        sentence: Span,
+        prediction: tuple[tuple[str, ...] | list[str], list[list[tuple[str, float]]]]
+        | None = None,
+    ) -> tuple[list[list[Atom]], list[list[AtomTrace]]]:
         atom_types: tuple[str, ...] | list[str]
         top_candidates: list[list[tuple[str, float]]]
-        atom_types, top_candidates = self.alpha.predict(sentence, features)
+        if prediction is not None:
+            atom_types, top_candidates = prediction
+        else:
+            features: list[tuple[str, str, str, str, str]] = self._token_features(
+                sentence
+            )
+            assert self.alpha is not None, "Alpha must be initialized before parsing"
+            atom_types, top_candidates = self.alpha.predict(sentence, features)
         atom_types = self._fix_atom_classifications(sentence, atom_types)
 
         self.token2atom = {}
@@ -1408,3 +1552,34 @@ class AlphaBetaParser(Parser):
         _edge = self._process_colon_conjunctions(_edge)
         _edge = self._flatten_conjunctions(_edge)
         return _edge
+
+
+# Worker-process state. Each spawned process gets its own AlphaBetaParser
+# instance, lazily constructed by _worker_init on pool startup.
+_WORKER_PARSER: AlphaBetaParser | None = None
+
+
+def _worker_init(params: dict[str, Any]) -> None:
+    import os
+
+    global _WORKER_PARSER
+    # HF tokenizers warns loudly when forked after first use; we don't
+    # need its internal thread pool inside the workers.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    # Force the worker to single-process; otherwise it would try to
+    # spawn its own pool.
+    worker_params: dict[str, Any] = dict(params)
+    worker_params["n_workers"] = 1
+    _WORKER_PARSER = AlphaBetaParser(worker_params)
+
+
+def _worker_parse_chunk(chunk: list[str]) -> list[list[ParseResult]]:
+    assert _WORKER_PARSER is not None, "worker parser not initialized"
+    results: list[list[ParseResult]] = _WORKER_PARSER._parse_batch_inproc(chunk)
+    # spaCy Span objects don't survive cross-process pickling cleanly;
+    # the REPL hook that consumes 'spacy_sent' only runs in the main
+    # process anyway, so drop it from worker results.
+    for sent_results in results:
+        for r in sent_results:
+            r.extra.pop("spacy_sent", None)
+    return results

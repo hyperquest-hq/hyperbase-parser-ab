@@ -100,3 +100,46 @@ class Alpha:
                 tuple(pred[0] if pred else "C" for pred in preds_arr),
                 [[] for _ in features],
             )
+
+    def predict_batch(
+        self,
+        sentences: list[Span],
+        features_list: list[list[tuple[str, str, str, str, str]]],
+    ) -> list[tuple[tuple[str, ...] | list[str], list[list[tuple[str, float]]]]]:
+        """Predict atom types for several sentences at once.
+
+        With the atomizer, runs a single batched transformer forward
+        pass over all input spans. Without it, falls back to per-item
+        :meth:`predict` (the classifier path is cheap enough that
+        batching it is not a priority)."""
+        if not sentences:
+            return []
+        if self.atomizer:
+            sentences_str: list[str] = [str(s) for s in sentences]
+            tokens_list: list[list[str]] = [
+                [str(token) for token in s] for s in sentences
+            ]
+            all_preds = self.atomizer.atomize_batch(
+                sentences=sentences_str,
+                tokens_list=tokens_list,
+                top_k=3,
+            )
+            results: list[
+                tuple[tuple[str, ...] | list[str], list[list[tuple[str, float]]]]
+            ] = []
+            for sent_span, preds in zip(sentences, all_preds, strict=True):
+                top_candidates: list[list[tuple[str, float]]] = [
+                    pred[1]
+                    for pred in preds  # type: ignore[misc]
+                ]
+                atom_types: list[str] = [cands[0][0] for cands in top_candidates]
+                if not self.use_atomizer_subtype:
+                    for i in range(len(atom_types)):
+                        if sent_span[i].pos_ == "VERB":
+                            atom_types[i] = "P"
+                results.append((atom_types, top_candidates))
+            return results
+        return [
+            self.predict(sent, feats)
+            for sent, feats in zip(sentences, features_list, strict=True)
+        ]

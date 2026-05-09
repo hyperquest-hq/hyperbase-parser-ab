@@ -98,6 +98,56 @@ class Atomizer:
 
         return results
 
+    def atomize_batch(
+        self,
+        sentences: list[str],
+        tokens_list: list[list[str]],
+        top_k: int = 1,
+    ) -> list[list[WordPrediction] | list[WordPredictionTopK]]:
+        """Run a single padded forward pass over multiple sentences.
+
+        Equivalent to calling ``atomize(sentence, tokens, top_k)`` once
+        per item, but pays the tokenizer + model forward overhead a
+        single time for the whole batch."""
+        if not sentences:
+            return []
+
+        encoded = self.tokenizer(
+            sentences,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            return_offsets_mapping=True,
+        )
+        offset_mapping_all = encoded.pop("offset_mapping")
+
+        with torch.no_grad():
+            outputs = self.model(**encoded)
+
+        probs_all: torch.Tensor = torch.softmax(outputs.logits, dim=-1)
+        pred_ids_all: torch.Tensor = probs_all.argmax(-1)
+
+        results: list[list[WordPrediction] | list[WordPredictionTopK]] = []
+        for i, (sentence, tokens) in enumerate(
+            zip(sentences, tokens_list, strict=True)
+        ):
+            word_ids: list[int | None] = encoded.word_ids(i)
+            probs: torch.Tensor = probs_all[i]
+            pred_ids: list[int] = pred_ids_all[i].tolist()
+            offset_mapping: list[list[int]] = offset_mapping_all[i].tolist()
+            results.append(
+                self._map_tokens_to_predictions(
+                    sentence,
+                    tokens,
+                    word_ids,
+                    pred_ids,
+                    probs,
+                    offset_mapping,
+                    top_k,
+                )
+            )
+        return results
+
     def _format_prediction(
         self,
         text: str,
