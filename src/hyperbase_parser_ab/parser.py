@@ -1113,6 +1113,27 @@ class AlphaBetaParser(Parser):
                 sig.append(a.atom_str)
         return frozenset(sig)
 
+    def _plus_builder_bonus(self, edge: Hyperedge) -> int:
+        # Reward +/B/. builder candidates whose token-derived atoms cover a
+        # contiguous span of the source sentence — this biases the search
+        # toward compounds that respect surface adjacency over long-range
+        # stitches. The connector may carry argroles after _apply_arg_roles
+        # (e.g. "+/B.ma/."), but its root remains "+".
+        if edge.atom or not edge[0].atom:
+            return 0
+        if cast(Atom, edge[0]).root() != "+":
+            return 0
+        positions: set[int] = set()
+        for atom in edge.all_atoms():
+            token: Token | None = self.atom2token.get(atom)
+            if token is not None:
+                positions.add(token.i)
+        if not positions:
+            return 0
+        if max(positions) - min(positions) + 1 != len(positions):
+            return 0
+        return 10 * len(positions)
+
     def _window_connected(self, edges: list[Hyperedge]) -> bool:
         atom_sets: list[list[Atom]] = [e.all_atoms() for e in edges]
         return any(self._are_connected(atom_sets, p) for p in range(len(edges)))
@@ -1191,7 +1212,9 @@ class AlphaBetaParser(Parser):
                     window: list[Hyperedge] = beam.sequence[
                         pos - window_start : pos + 1
                     ]
-                    score: int = self._score(window)
+                    score: int = self._score(window) + self._plus_builder_bonus(
+                        new_edge
+                    )
                     bad: int = self._candidate_badness(new_edge)
                     distortion: int = self._distance_distortion_delta(new_edge)
                     cand_records.append(
