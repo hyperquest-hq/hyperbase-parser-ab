@@ -5,6 +5,8 @@
 ### Added
 
 - Beam search.
+- Exact search.
+- Structural distortion metric.
 - Atom classifier fixed cases.
 - Parse trace reports in the repl.
 - use_atomizer_subtype option (defaults to True).
@@ -13,6 +15,7 @@
 ### Changed
 
 - Simplified parses, "r" argrole no longer produced.
+- Atomizer provides alternative labels for search.
 - Adapted to REPL API (multiple results per parse possible).
 
 ### Removed
