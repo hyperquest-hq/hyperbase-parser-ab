@@ -21,6 +21,7 @@ class AtomTrace:
     final_atom: str
     dropped: bool
     top_candidates: list[tuple[str, float]] = field(default_factory=list)
+    chosen_label_rank: int = 0
 
 
 @dataclass
@@ -31,6 +32,7 @@ class RuleCandidate:
     score: int
     new_edge_repr: str
     badness: int = 0
+    distortion: int = 0
     is_winner: bool = False
 
 

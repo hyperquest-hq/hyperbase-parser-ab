@@ -344,7 +344,7 @@ class TestParserBeamSearch:
         atom_b = hedge("dog/Cc/en")
         assert atom_a is not None
         assert atom_b is not None
-        result, failed = parser._parse_atom_sequence([atom_a, atom_b])
+        result, failed, _ = parser._parse_atom_sequence([[atom_a, atom_b]])
         assert result is not None
         assert len(result) == 1
         assert failed is False
@@ -359,24 +359,24 @@ class TestParserBeamSearch:
         atom_b = hedge("dog/Cc/en")
         assert atom_a is not None
         assert atom_b is not None
-        result, failed = parser._parse_atom_sequence([atom_a, atom_b])
+        result, failed, _ = parser._parse_atom_sequence([[atom_a, atom_b]])
         assert result is not None
         assert len(result) == 1
         assert failed is False
 
-    def test_beam_returns_lowest_cumulative_badness(self):
+    def test_beam_returns_lowest_total_badness(self):
         """With width=2 the search should keep the clean path alive even when
         the locally-best candidate is only marginally better."""
         parser = _make_parser()
         parser.beam_width = 2
         self._setup_loop_state(parser)
         # Three concepts: must reduce two pairs in sequence. Several beam
-        # paths exist; the clean-path winner should have cum_badness == 0
+        # paths exist; the clean-path winner should have total_badness == 0
         # because every C+C → +/B is structurally clean.
         atoms = [hedge("a/Cc/en"), hedge("b/Cc/en"), hedge("c/Cc/en")]
         for a in atoms:
             assert a is not None
-        result, _failed = parser._parse_atom_sequence(atoms)
+        result, _failed, _ = parser._parse_atom_sequence([atoms])
         assert result is not None
         assert len(result) == 1
 

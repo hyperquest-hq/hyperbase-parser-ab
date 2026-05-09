@@ -130,6 +130,7 @@ def _iteration_panel(it: RuleIteration) -> Panel:
     candidates_table.add_column("rule", style="white")
     candidates_table.add_column("pos", style="dim", justify="right")
     candidates_table.add_column("badness", style="dim", justify="right")
+    candidates_table.add_column("distortion", style="dim", justify="right")
     candidates_table.add_column("score", style="dim", justify="right")
     candidates_table.add_column("new edge", style="white")
 
@@ -141,12 +142,13 @@ def _iteration_panel(it: RuleIteration) -> Panel:
                 Text(f"{marker}{cand.rule_repr}", style=style),
                 Text(str(cand.pos), style=style),
                 Text(str(cand.badness), style=style),
+                Text(str(cand.distortion), style=style),
                 Text(str(cand.score), style=style),
                 Text(cand.new_edge_repr, style=style),
             )
     else:
         candidates_table.add_row(
-            Text("(no candidates)", style="dim italic"), "", "", "", ""
+            Text("(no candidates)", style="dim italic"), "", "", "", "", ""
         )
 
     body: list[object] = [seq_text, candidates_table]
@@ -245,6 +247,16 @@ def install(parser: AlphaBetaParser, session: object) -> None:
         default=False,
         type_=bool,
         description="Show detailed parse trace (atoms, rules, transformations).",
+    )
+    session.register_setting(  # type: ignore[attr-defined]
+        "exact_search",
+        default=parser.exact_search,
+        type_=bool,
+        description=(
+            "Use exhaustive branch-and-bound search instead of beam search. "
+            "Guarantees the (badness, distortion)-optimal parse but is "
+            "worst-case exponential."
+        ),
     )
     session.register_pre_result_hook(_make_pre_result_hook(parser))  # type: ignore[attr-defined]
     session.register_pre_result_hook(_make_report_hook(parser))  # type: ignore[attr-defined]

@@ -1,5 +1,8 @@
+import heapq
+import math
 import re
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -86,14 +89,20 @@ def _is_verb(token: Token) -> bool:
 _BADNESS_WEIGHTS: dict[int, int] = {0: 1000, 1: 100, 2: 10, 3: 1}
 _BADNESS_CRASH_PENALTY: int = 1_000_000
 
+# Maximum main probability for the runner-up atomizer label to be considered a
+# viable alternative atom assignment in the beam-search seed sequences.
+_ALT_LABEL_THRESHOLD: float = 0.99
+
 
 @dataclass
 class _Beam:
     sequence: list[Hyperedge]
-    cum_badness: int
-    cum_score: int
+    total_badness: int
+    total_score: int
+    total_distortion: int = 0
     iterations: list[RuleIteration] = field(default_factory=list)
     failed: bool = False
+    seq_index: int = 0
 
 
 def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -> str:
@@ -164,8 +173,20 @@ class AlphaBetaParser(Parser):
                 "description": (
                     "Beam search width for the reduction loop. 1 (default) "
                     "is greedy. Higher values keep multiple parse hypotheses "
-                    "alive in parallel and pick the lowest-cumulative-badness "
-                    "one at the end (tie-broken by cumulative score)."
+                    "alive in parallel and pick the lowest-total-badness "
+                    "one at the end (tie-broken by total score)."
+                ),
+                "required": False,
+            },
+            "exact_search": {
+                "type": bool,
+                "default": False,
+                "description": (
+                    "If True, run an exhaustive branch-and-bound search "
+                    "instead of beam search. Guarantees finding the "
+                    "(badness, distortion)-optimal parse but disregards "
+                    "beam_width and is worst-case exponential. In practice "
+                    "fast when low-badness parses are easy to find."
                 ),
                 "required": False,
             },
@@ -185,6 +206,7 @@ class AlphaBetaParser(Parser):
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
         self.beam_width: int = max(1, int(self.params.get("beam_width", 5)))
+        self.exact_search: bool = bool(self.params.get("exact_search", False))
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -214,6 +236,7 @@ class AlphaBetaParser(Parser):
         self.token2atom: dict[Token, Atom] = {}
         self.depths: dict[Atom, int] = {}
         self.connections: set[tuple[Atom, Atom]] = set()
+        self.dep_dist: dict[tuple[UniqueAtom, UniqueAtom], int] = {}
         self.doc: Doc | None = None
 
         self._repl_session: Any = None
@@ -226,6 +249,12 @@ class AlphaBetaParser(Parser):
     def _report_enabled(self) -> bool:
         sess: Any = self._repl_session
         return bool(sess and sess.settings.get("report", False))
+
+    def _exact_search_enabled(self) -> bool:
+        sess: Any = self._repl_session
+        if sess is not None:
+            return bool(sess.settings.get("exact_search", self.exact_search))
+        return self.exact_search
 
     def install_repl(self, session: object) -> None:
         from hyperbase_parser_ab.repl import install
@@ -261,15 +290,26 @@ class AlphaBetaParser(Parser):
         try:
             self._cur_trace = ParseTrace() if self._report_enabled() else None
 
+            atom_sequences: list[list[Atom]]
+            sequence_traces: list[list[AtomTrace]]
             if atom_sequence is None:
-                atom_sequence = self._build_atom_sequence(sent)
+                atom_sequences, sequence_traces = self._build_atom_sequences(sent)
+            else:
+                atom_sequences = [atom_sequence]
+                sequence_traces = [[]]
 
             self._compute_depths_and_connections(sent.root)
+            self._compute_dep_distances()
 
             edge: Hyperedge | None = None
             result: list[Hyperedge] | None
             failed: bool
-            result, failed = self._parse_atom_sequence(atom_sequence)
+            winner_idx: int
+            result, failed, winner_idx = self._parse_atom_sequence(atom_sequences)
+
+            if self._cur_trace is not None and sequence_traces:
+                idx: int = winner_idx if 0 <= winner_idx < len(sequence_traces) else 0
+                self._cur_trace.atoms.extend(sequence_traces[idx])
             if result and len(result) == 1:
                 edge = non_unique(result[0])
                 self.debug_msg(f"Initial parse: {edge!s}")
@@ -387,6 +427,7 @@ class AlphaBetaParser(Parser):
             "dative",
             "obl",
             "obl:arg",
+            "obl:mod",
             "da",
             "advcl",
             "prep",
@@ -591,7 +632,60 @@ class AlphaBetaParser(Parser):
                 fixed[i] = "Bx"
         return fixed
 
-    def _build_atom_sequence(self, sentence: Span) -> list[Atom]:
+    def _kbest_label_states(
+        self,
+        per_token_choices: list[list[tuple[str, float]]],
+        k: int,
+    ) -> list[tuple[int, ...]]:
+        """Enumerate up to k joint label assignments in order of descending
+        joint probability, using a best-first priority queue over the
+        product of independently-ranked per-token candidate lists.
+
+        Each state is a tuple ``(j_0, ..., j_{n-1})`` where ``j_i`` selects
+        which candidate is used at token position i. Priority is the
+        negative log joint probability (lower = better)."""
+        n: int = len(per_token_choices)
+        if n == 0:
+            return [()]
+
+        def cost(state: tuple[int, ...]) -> float:
+            c: float = 0.0
+            for i, j in enumerate(state):
+                score: float = per_token_choices[i][j][1]
+                if score <= 0.0:
+                    return float("inf")
+                c += -math.log(score)
+            return c
+
+        start: tuple[int, ...] = (0,) * n
+        heap: list[tuple[float, int, tuple[int, ...]]] = []
+        # The integer counter breaks ties so heapq never compares the
+        # tuples themselves (which would be wasted work).
+        counter: int = 0
+        heapq.heappush(heap, (cost(start), counter, start))
+        visited: set[tuple[int, ...]] = {start}
+        results: list[tuple[int, ...]] = []
+
+        while heap and len(results) < k:
+            _, _, state = heapq.heappop(heap)
+            results.append(state)
+            for i in range(n):
+                if state[i] + 1 < len(per_token_choices[i]):
+                    new_state: tuple[int, ...] = (
+                        *state[:i],
+                        state[i] + 1,
+                        *state[i + 1 :],
+                    )
+                    if new_state not in visited:
+                        visited.add(new_state)
+                        counter += 1
+                        heapq.heappush(heap, (cost(new_state), counter, new_state))
+
+        return results
+
+    def _build_atom_sequences(
+        self, sentence: Span
+    ) -> tuple[list[list[Atom]], list[list[AtomTrace]]]:
         features: list[tuple[str, str, str, str, str]] = []
         for pos, token in enumerate(sentence):
             head: Token = token.head
@@ -613,33 +707,84 @@ class AlphaBetaParser(Parser):
 
         self.token2atom = {}
 
-        atomseq: list[Atom] = []
-        for token, predicted_type, candidates in zip(
+        # Per-token choice lists. Element 0 is always the (fixed) top-1
+        # label; element 1 (when present) is the runner-up label if top-1
+        # score < _ALT_LABEL_THRESHOLD, differs from top-1, and yields a
+        # non-None atom. Excluding alternatives that drop the token keeps
+        # the sequence length identical across variants.
+        per_token_choices: list[list[tuple[str, float]]] = []
+        for token, top1_label, candidates in zip(
             sentence, atom_types, top_candidates, strict=True
         ):
-            atom: Atom | None
-            refined_type: str
-            atom, refined_type = self._parse_token(token, predicted_type)
-            if atom:
-                uatom: Atom = UniqueAtom(atom)
-                self.atom2token[uatom] = token
-                self.token2atom[token] = uatom
-                self.orig_atom[uatom] = uatom
-                atomseq.append(uatom)
-            if self._cur_trace is not None:
-                self._cur_trace.atoms.append(
+            top1_score: float = candidates[0][1] if candidates else 1.0
+            choices: list[tuple[str, float]] = [(top1_label, top1_score)]
+            if len(candidates) >= 2:
+                top2_label, top2_score = candidates[1]
+                if top1_score < _ALT_LABEL_THRESHOLD and top2_label != top1_label:
+                    alt_atom, _alt_refined = self._parse_token(token, top2_label)
+                    if alt_atom is not None:
+                        choices.append((top2_label, top2_score))
+            per_token_choices.append(choices)
+
+        state_vectors: list[tuple[int, ...]] = self._kbest_label_states(
+            per_token_choices, self.beam_width
+        )
+        # Ensure the all-top-1 state comes first so its atoms become the
+        # canonical mapping in self.token2atom (used downstream by
+        # _compute_depths_and_connections).
+        zero_state: tuple[int, ...] = (0,) * len(per_token_choices)
+        if state_vectors and state_vectors[0] != zero_state:
+            if zero_state in state_vectors:
+                state_vectors.remove(zero_state)
+            state_vectors.insert(0, zero_state)
+
+        primary_atoms_per_token: list[Atom | None] = [None] * len(per_token_choices)
+        sequences: list[list[Atom]] = []
+        sequence_traces: list[list[AtomTrace]] = []
+
+        for seq_idx, state in enumerate(state_vectors):
+            atomseq: list[Atom] = []
+            atom_traces: list[AtomTrace] = []
+            for tok_idx, (token, choices, j) in enumerate(
+                zip(sentence, per_token_choices, state, strict=True)
+            ):
+                label, _score = choices[j]
+                atom: Atom | None
+                refined_type: str
+                atom, refined_type = self._parse_token(token, label)
+                if atom is not None:
+                    uatom: Atom = UniqueAtom(atom)
+                    self.atom2token[uatom] = token
+                    if seq_idx == 0:
+                        self.token2atom[token] = uatom
+                        self.orig_atom[uatom] = uatom
+                        primary_atoms_per_token[tok_idx] = uatom
+                    else:
+                        # Map alternative atoms back to the primary so
+                        # _is_pair_connected / _dep_depth see the same
+                        # token-level connectivity as the primary atom.
+                        primary: Atom | None = primary_atoms_per_token[tok_idx]
+                        self.orig_atom[uatom] = (
+                            primary if primary is not None else uatom
+                        )
+                    atomseq.append(uatom)
+                atom_traces.append(
                     AtomTrace(
                         token_text=token.text,
                         token_idx=token.i,
-                        predicted_type=predicted_type,
+                        predicted_type=label,
                         refined_type=refined_type,
                         final_atom=str(atom) if atom is not None else "",
                         dropped=atom is None,
-                        top_candidates=candidates,
+                        top_candidates=top_candidates[tok_idx],
+                        chosen_label_rank=j,
                     )
                 )
-        self.debug_msg(f"Atom sequence: {atomseq}")
-        return atomseq
+            sequences.append(atomseq)
+            sequence_traces.append(atom_traces)
+
+        self.debug_msg(f"Atom sequences ({len(sequences)}): {sequences}")
+        return sequences, sequence_traces
 
     def _compute_depths_and_connections(self, root: Token, depth: int = 0) -> None:
         if depth == 0:
@@ -658,6 +803,30 @@ class AlphaBetaParser(Parser):
                 self.connections.add((parent_atom, child_atom))
                 self.connections.add((child_atom, parent_atom))
             self._compute_depths_and_connections(child, depth + 1)
+
+    def _compute_dep_distances(self) -> None:
+        # BFS over self.connections (bidirectional) to populate the
+        # all-pairs distance matrix between UniqueAtom nodes.
+        self.dep_dist = {}
+        adj: dict[UniqueAtom, list[UniqueAtom]] = {}
+        for a, b in self.connections:
+            ua_a = self.orig_atom.get(a)
+            ua_b = self.orig_atom.get(b)
+            if ua_a is None or ua_b is None:
+                continue
+            adj.setdefault(ua_a, []).append(ua_b)
+
+        for src in adj:
+            dist: dict[UniqueAtom, int] = {src: 0}
+            queue: deque[UniqueAtom] = deque([src])
+            while queue:
+                u = queue.popleft()
+                for v in adj.get(u, ()):
+                    if v not in dist:
+                        dist[v] = dist[u] + 1
+                        queue.append(v)
+            for ua, d in dist.items():
+                self.dep_dist[(src, ua)] = d
 
     def _is_pair_connected(self, atoms1: list[Atom], atoms2: list[Atom]) -> bool:
         for atom1 in atoms1:
@@ -704,6 +873,66 @@ class AlphaBetaParser(Parser):
 
         return (10000000 if conn else 0) + (mdepth * 100) + n
 
+    def _atom_depths(self, edge: Hyperedge) -> dict[UniqueAtom, int]:
+        # Tree-distance from the root of edge's hyperedge-tree to every
+        # atom in edge that maps to a UniqueAtom. The tree of (C e1 ... ek)
+        # has root = root_atom(C); atoms in T(C) keep their depth, atoms in
+        # T(ei) for i>=1 have an extra +1 hop (root(T(ei)) -> root(T(C))).
+        out: dict[UniqueAtom, int] = {}
+        self._collect_atom_depths(edge, 0, out)
+        return out
+
+    def _collect_atom_depths(
+        self, edge: Hyperedge, base_depth: int, out: dict[UniqueAtom, int]
+    ) -> None:
+        if edge.atom:
+            ua = self.orig_atom.get(cast(Atom, edge))
+            if ua is not None and (ua not in out or base_depth < out[ua]):
+                out[ua] = base_depth
+            return
+        for i, child in enumerate(edge):
+            child_base = base_depth + (0 if i == 0 else 1)
+            self._collect_atom_depths(child, child_base, out)
+
+    def _distance_distortion_delta(self, new_edge: Hyperedge) -> int:
+        # Sum |dep_dist(a, b) - hyper_dist(a, b)| over every pair (a, b)
+        # whose endpoints first co-occur in this hyperedge. A pair first
+        # co-occurs when its atoms sit in distinct immediate children of
+        # new_edge. Once locked in, hyper_dist(a, b) is invariant under
+        # subsequent nesting, so charging each pair once at its first
+        # co-occurrence yields a well-defined cumulative cost.
+        #
+        # Each pair's contribution is scaled by the size of new_edge
+        # (its total atom count), so mistakes inside a large hyperedge
+        # cost more than the same mistake inside a tiny one.
+        if new_edge.atom:
+            return 0
+        children: list[Hyperedge] = list(new_edge)
+        if len(children) < 2:
+            return 0
+        sub_depths: list[dict[UniqueAtom, int]] = [
+            self._atom_depths(c) for c in children
+        ]
+        edge_size: int = len(new_edge.all_atoms())
+
+        distortion: int = 0
+        for i in range(len(children)):
+            for j in range(i + 1, len(children)):
+                # Cross-child hyper distance: depth_in_child_i + depth_in_child_j
+                # plus 1 hop if one side is the connector subtree (i==0),
+                # else 2 hops (both arg subtrees route through the connector).
+                extra: int = 1 if (i == 0 or j == 0) else 2
+                for ua_a, da in sub_depths[i].items():
+                    for ua_b, db in sub_depths[j].items():
+                        if ua_a == ua_b:
+                            continue
+                        dep_d = self.dep_dist.get((ua_a, ua_b))
+                        if dep_d is None:
+                            continue
+                        hyper_d = da + db + extra
+                        distortion += abs(dep_d - hyper_d) * edge_size
+        return distortion
+
     def _candidate_token_atoms(self, edge: Hyperedge) -> frozenset[Atom]:
         return frozenset(a for a in edge.all_atoms() if a in self.orig_atom)
 
@@ -748,14 +977,20 @@ class AlphaBetaParser(Parser):
             return _BADNESS_CRASH_PENALTY
         return total
 
-    def _expand_beam(self, beam: _Beam) -> list[_Beam]:
+    def _expand_beam(
+        self,
+        beam: _Beam,
+        prune: bool = True,
+        best_so_far: tuple[float, float] = (math.inf, math.inf),
+    ) -> list[_Beam]:
         base_iter: RuleIteration = RuleIteration(
             iteration=len(beam.iterations),
             sequence_repr=[str(e) for e in beam.sequence],
         )
         # Parallel lists kept in lockstep until the dominance filter.
-        # Per-candidate tuple: (score, new_edge, window_start, pos, badness)
-        cand_actions: list[tuple[int, Hyperedge, int, int, int]] = []
+        # Per-candidate tuple:
+        # (score, new_edge, window_start, pos, badness, distortion)
+        cand_actions: list[tuple[int, Hyperedge, int, int, int, int]] = []
         cand_records: list[RuleCandidate] = []
         cand_tokens: list[frozenset[Atom]] = []
         cand_conn: list[bool] = []
@@ -771,6 +1006,7 @@ class AlphaBetaParser(Parser):
                     ]
                     score: int = self._score(window)
                     bad: int = self._candidate_badness(new_edge)
+                    distortion: int = self._distance_distortion_delta(new_edge)
                     cand_records.append(
                         RuleCandidate(
                             rule_index=rule_number,
@@ -779,9 +1015,12 @@ class AlphaBetaParser(Parser):
                             score=score,
                             new_edge_repr=str(new_edge),
                             badness=bad,
+                            distortion=distortion,
                         )
                     )
-                    cand_actions.append((score, new_edge, window_start, pos, bad))
+                    cand_actions.append(
+                        (score, new_edge, window_start, pos, bad, distortion)
+                    )
                     cand_tokens.append(self._candidate_token_atoms(new_edge))
                     cand_conn.append(self._window_connected(window))
                     cand_can_dominate.append(rule.can_dominate)
@@ -815,23 +1054,47 @@ class AlphaBetaParser(Parser):
             return [
                 _Beam(
                     sequence=new_sequence,
-                    cum_badness=beam.cum_badness + _BADNESS_CRASH_PENALTY,
-                    cum_score=beam.cum_score,
+                    total_badness=beam.total_badness + _BADNESS_CRASH_PENALTY,
+                    total_score=beam.total_score,
+                    total_distortion=beam.total_distortion,
                     iterations=[*beam.iterations, base_iter],
                     failed=True,
+                    seq_index=beam.seq_index,
                 )
             ]
 
-        # Pick top-k actions from this beam by (badness ASC, score DESC) so
-        # one beam can't fan out beyond beam_width children.
-        indexed: list[tuple[int, tuple[int, Hyperedge, int, int, int]]] = list(
+        indexed: list[tuple[int, tuple[int, Hyperedge, int, int, int, int]]] = list(
             enumerate(cand_actions)
         )
-        indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
-        top = indexed[: self.beam_width]
+        if prune:
+            # Pick top-k actions from this beam by (badness ASC, score DESC)
+            # so one beam can't fan out beyond beam_width children.
+            indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
+            top = indexed[: self.beam_width]
+        else:
+            # Branch-and-bound: keep every candidate whose extension cost
+            # is not already strictly worse than best_so_far. Cumulative
+            # badness and distortion are monotone non-decreasing, so this
+            # prune is admissible.
+            top = [
+                ia
+                for ia in indexed
+                if (
+                    beam.total_badness + ia[1][4],
+                    beam.total_distortion + ia[1][5],
+                )
+                <= best_so_far
+            ]
 
         extensions: list[_Beam] = []
-        for cand_idx, (score, new_edge, window_start, pos, bad) in top:
+        for cand_idx, (
+            score,
+            new_edge,
+            window_start,
+            pos,
+            bad,
+            distortion,
+        ) in top:
             iter_for_child: RuleIteration = RuleIteration(
                 iteration=base_iter.iteration,
                 sequence_repr=base_iter.sequence_repr,
@@ -843,6 +1106,7 @@ class AlphaBetaParser(Parser):
                         score=c.score,
                         new_edge_repr=c.new_edge_repr,
                         badness=c.badness,
+                        distortion=c.distortion,
                         is_winner=(i == cand_idx),
                     )
                     for i, c in enumerate(base_iter.candidates)
@@ -858,25 +1122,63 @@ class AlphaBetaParser(Parser):
             extensions.append(
                 _Beam(
                     sequence=new_sequence,
-                    cum_badness=beam.cum_badness + bad,
-                    cum_score=beam.cum_score + score,
+                    total_badness=beam.total_badness + bad,
+                    total_score=beam.total_score + score,
+                    total_distortion=beam.total_distortion + distortion,
                     iterations=[*beam.iterations, iter_for_child],
                     failed=beam.failed,
+                    seq_index=beam.seq_index,
                 )
             )
         return extensions
 
-    def _parse_atom_sequence(
-        self, atom_sequence: list[Atom]
-    ) -> tuple[list[Hyperedge] | None, bool]:
+    def _exact_search(self, beams: list[_Beam]) -> list[_Beam]:
+        # Branch-and-bound search guaranteeing the (badness, distortion)-
+        # optimal parse. cumulative badness and distortion are both
+        # monotone non-decreasing across reductions, so once any beam
+        # completes we can prune every in-flight beam whose current cost
+        # already exceeds the best completed cost.
+        best_so_far: tuple[float, float] = (math.inf, math.inf)
+
+        while not all(len(b.sequence) < 2 for b in beams):
+            next_beams: list[_Beam] = []
+            for beam in beams:
+                if len(beam.sequence) < 2:
+                    next_beams.append(beam)
+                    continue
+                if (beam.total_badness, beam.total_distortion) > best_so_far:
+                    continue
+                for ext in self._expand_beam(
+                    beam, prune=False, best_so_far=best_so_far
+                ):
+                    cost = (ext.total_badness, ext.total_distortion)
+                    if cost > best_so_far:
+                        continue
+                    if len(ext.sequence) < 2 and cost < best_so_far:
+                        best_so_far = cost
+                    next_beams.append(ext)
+            # best_so_far may have improved during this iteration; re-prune.
+            beams = [
+                b
+                for b in next_beams
+                if (b.total_badness, b.total_distortion) <= best_so_far
+            ]
+            if not beams:
+                break
+
+        return beams
+
+    def _beam_search_one_sequence(
+        self, atom_sequence: list[Atom], seq_index: int
+    ) -> list[_Beam]:
         beams: list[_Beam] = [
             _Beam(
                 sequence=list(atom_sequence),
-                cum_badness=0,
-                cum_score=0,
+                total_badness=0,
+                total_score=0,
+                seq_index=seq_index,
             )
         ]
-
         while not all(len(b.sequence) < 2 for b in beams):
             next_beams: list[_Beam] = []
             for beam in beams:
@@ -884,21 +1186,62 @@ class AlphaBetaParser(Parser):
                     next_beams.append(beam)
                 else:
                     next_beams.extend(self._expand_beam(beam))
-            next_beams.sort(key=lambda b: (b.cum_badness, -b.cum_score))
+            next_beams.sort(key=lambda b: (b.total_badness, -b.total_score))
             beams = next_beams[: self.beam_width]
+        return beams
 
+    def _parse_atom_sequence(
+        self, atom_sequences: list[list[Atom]]
+    ) -> tuple[list[Hyperedge] | None, bool, int]:
+        beams: list[_Beam]
+        if self._exact_search_enabled():
+            # Branch-and-bound shares cost across sequences, so run them
+            # all together — once one sequence finds an optimum, the bound
+            # prunes inferior alternatives in the others.
+            beams = [
+                _Beam(
+                    sequence=list(seq),
+                    total_badness=0,
+                    total_score=0,
+                    seq_index=i,
+                )
+                for i, seq in enumerate(atom_sequences)
+            ]
+            beams = self._exact_search(beams)
+        else:
+            # Beam search: run each atomization in its own search so
+            # alternatives don't compete for the same beam_width slots.
+            # Otherwise a sequence whose optimum requires intermediate
+            # states that score worse than a competitor at iteration t
+            # gets pruned before its better final state is realized.
+            beams = []
+            for i, seq in enumerate(atom_sequences):
+                beams.extend(self._beam_search_one_sequence(seq, i))
+
+        beams.sort(key=lambda b: (b.total_badness, b.total_distortion))
         best: _Beam = beams[0]
 
         if self._cur_trace is not None:
             self._cur_trace.iterations.extend(best.iterations)
 
         self.debug_msg(f"Final beam sequence: {best.sequence}")
-        self.debug_msg(f"Cumulative badness: {best.cum_badness}")
-        self.debug_msg(f"Cumulative score: {best.cum_score}")
+        self.debug_msg(f"Total badness: {best.total_badness}")
+        self.debug_msg(f"Total score: {best.total_score}")
+        self.debug_msg(f"Total distortion: {best.total_distortion}")
+        self.debug_msg(f"Winning seq_index: {best.seq_index}")
+        if len(beams) > 1:
+            self.debug_msg(f"Surviving beams ({len(beams)}):")
+            for b in beams:
+                self.debug_msg(
+                    f"  seq_index={b.seq_index} "
+                    f"badness={b.total_badness} "
+                    f"distortion={b.total_distortion} "
+                    f"score={b.total_score}"
+                )
 
         if not best.sequence and best.failed:
-            return None, True
-        return best.sequence, best.failed
+            return None, True, best.seq_index
+        return best.sequence, best.failed, best.seq_index
 
     def get_sentences(self, text: str) -> list[str]:
         if self.nlp:
