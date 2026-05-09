@@ -30,8 +30,10 @@ RULES: list[Rule] = [
     Rule("P", {"C", "R", "S"}, 4),
     Rule("P", {"C", "R", "S"}, 3),
     Rule("P", {"C", "R", "S"}, 2),
-    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3, can_dominate=False),
-    Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2, can_dominate=False),
+    # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3, can_dominate=False),
+    # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2, can_dominate=False),
+    Rule("J", {"C", "R"}, 3, can_dominate=False),
+    Rule("J", {"C", "R"}, 2, can_dominate=False),
 ]
 
 
