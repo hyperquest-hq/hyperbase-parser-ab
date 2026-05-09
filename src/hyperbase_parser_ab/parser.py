@@ -585,7 +585,6 @@ class AlphaBetaParser(Parser):
             "oc",
         }:
             return "o"
-        # indirect object
         elif dep in {
             "iobj",
             "dative",
