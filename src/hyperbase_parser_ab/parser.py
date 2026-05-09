@@ -527,7 +527,24 @@ class AlphaBetaParser(Parser):
             traceback.print_exc()
             return None
 
+    def _has_flat_name(self, edge: Hyperedge) -> bool:
+        for atom in edge.all_atoms():
+            uatom: Hyperedge | None = unique(atom)
+            if uatom is None:
+                continue
+            uatom = cast(Atom, uatom)
+            token: Token | None = self.atom2token.get(uatom)
+            if token is not None and token.dep_ == "flat:name":
+                return True
+        return False
+
     def _builder_arg_roles(self, edge: Hyperedge) -> str:
+        flat1: bool = self._has_flat_name(edge[1])
+        flat2: bool = self._has_flat_name(edge[2])
+        if flat1 and not flat2:
+            return "ma"
+        if flat2 and not flat1:
+            return "am"
         depth1: int = self._dep_depth(edge[1])
         depth2: int = self._dep_depth(edge[2])
         if depth1 > depth2:
