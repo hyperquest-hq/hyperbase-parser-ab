@@ -10,17 +10,19 @@ class Rule:
         size: int,
         connector: str | None = None,
         can_dominate: bool = True,
+        mandatory: bool = False,
     ) -> None:
         self.first_type: str = first_type
         self.arg_types: set[str] = arg_types
         self.size: int = size
         self.connector: str | None = connector
         self.can_dominate: bool = can_dominate
+        self.mandatory: bool = mandatory
         self._branches: int = 0
 
 
 RULES: list[Rule] = [
-    Rule("C", {"C"}, 2, "+/B/."),
+    Rule("C", {"C"}, 2, "+/B/.", mandatory=True),
     Rule("C", {"R"}, 2, ":/J/."),
     Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
     Rule("B", {"C", "R"}, 3),

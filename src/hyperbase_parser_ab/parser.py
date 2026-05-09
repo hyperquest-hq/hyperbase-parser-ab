@@ -1188,6 +1188,7 @@ class AlphaBetaParser(Parser):
         cand_signatures: list[frozenset] = []
         cand_conn: list[bool] = []
         cand_can_dominate: list[bool] = []
+        cand_mandatory: list[bool] = []
 
         for rule_number, rule in enumerate(RULES):
             window_start: int = rule.size - 1
@@ -1234,6 +1235,7 @@ class AlphaBetaParser(Parser):
                     cand_signatures.append(self._candidate_dominance_atoms(new_edge))
                     cand_conn.append(self._window_connected(window))
                     cand_can_dominate.append(rule.can_dominate)
+                    cand_mandatory.append(rule.mandatory)
                 else:
                     base_iter.rejections.append((rule_number, pos))
 
@@ -1254,6 +1256,7 @@ class AlphaBetaParser(Parser):
                     break
         cand_actions = [cand_actions[i] for i in range(n) if keep[i]]
         base_iter.candidates = [cand_records[i] for i in range(n) if keep[i]]
+        cand_mandatory = [cand_mandatory[i] for i in range(n) if keep[i]]
 
         if not cand_actions:
             base_iter.fallback_used = True
@@ -1279,10 +1282,15 @@ class AlphaBetaParser(Parser):
         indexed: list[tuple[int, tuple[int, Hyperedge, int, int, int, int]]] = list(
             enumerate(cand_actions)
         )
-        if prune:
+        # Sort by (badness ASC, score DESC) to determine first place. A
+        # mandatory rule that ranks first short-circuits both pruning modes:
+        # only that single candidate survives, every alternative is dropped.
+        indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
+        if indexed and cand_mandatory[indexed[0][0]]:
+            top = [indexed[0]]
+        elif prune:
             # Pick top-k actions from this beam by (badness ASC, score DESC)
             # so one beam can't fan out beyond beam_width children.
-            indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
             top = indexed[: self.beam_width]
         else:
             # Branch-and-bound: keep every candidate whose extension cost
