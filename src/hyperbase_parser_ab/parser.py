@@ -1,6 +1,8 @@
 import heapq
 import math
 import re
+import sys
+import time
 import traceback
 from collections import deque
 from dataclasses import dataclass, field
@@ -190,6 +192,18 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
+            "exact_search_timeout": {
+                "type": float,
+                "default": 10.0,
+                "description": (
+                    "Per-atomization wall-clock budget (seconds) for exact "
+                    "search. When exceeded, returns the best completed "
+                    "beam found so far for that atomization, or falls back "
+                    "to beam search if none completed. 0 disables the "
+                    "timeout. Only used when exact_search=True."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -207,6 +221,9 @@ class AlphaBetaParser(Parser):
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
         self.beam_width: int = max(1, int(self.params.get("beam_width", 5)))
         self.exact_search: bool = bool(self.params.get("exact_search", False))
+        self.exact_search_timeout: float = float(
+            self.params.get("exact_search_timeout", 30.0)
+        )
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -763,7 +780,10 @@ class AlphaBetaParser(Parser):
                         # Map alternative atoms back to the primary so
                         # _is_pair_connected / _dep_depth see the same
                         # token-level connectivity as the primary atom.
-                        primary: Atom | None = primary_atoms_per_token[tok_idx]
+                        primary = primary_atoms_per_token[tok_idx]
+                        primary = (
+                            cast(UniqueAtom, primary) if primary is not None else None
+                        )
                         self.orig_atom[uatom] = (
                             primary if primary is not None else uatom
                         )
@@ -1132,15 +1152,24 @@ class AlphaBetaParser(Parser):
             )
         return extensions
 
-    def _exact_search(self, beams: list[_Beam]) -> list[_Beam]:
+    def _exact_search(
+        self, beams: list[_Beam], deadline: float | None = None
+    ) -> tuple[list[_Beam], bool]:
         # Branch-and-bound search guaranteeing the (badness, distortion)-
         # optimal parse. cumulative badness and distortion are both
         # monotone non-decreasing across reductions, so once any beam
         # completes we can prune every in-flight beam whose current cost
         # already exceeds the best completed cost.
+        #
+        # If `deadline` is provided (time.monotonic() target), the search
+        # bails out when reached, returning whatever completed beams it
+        # has found and `finished=False`.
         best_so_far: tuple[float, float] = (math.inf, math.inf)
 
         while not all(len(b.sequence) < 2 for b in beams):
+            if deadline is not None and time.monotonic() >= deadline:
+                completed = [b for b in beams if len(b.sequence) < 2]
+                return completed, False
             next_beams: list[_Beam] = []
             for beam in beams:
                 if len(beam.sequence) < 2:
@@ -1166,7 +1195,7 @@ class AlphaBetaParser(Parser):
             if not beams:
                 break
 
-        return beams
+        return beams, True
 
     def _beam_search_one_sequence(
         self, atom_sequence: list[Atom], seq_index: int
@@ -1193,28 +1222,46 @@ class AlphaBetaParser(Parser):
     def _parse_atom_sequence(
         self, atom_sequences: list[list[Atom]]
     ) -> tuple[list[Hyperedge] | None, bool, int]:
-        beams: list[_Beam]
+        beams: list[_Beam] = []
         if self._exact_search_enabled():
-            # Branch-and-bound shares cost across sequences, so run them
-            # all together — once one sequence finds an optimum, the bound
-            # prunes inferior alternatives in the others.
-            beams = [
-                _Beam(
-                    sequence=list(seq),
-                    total_badness=0,
-                    total_score=0,
-                    seq_index=i,
-                )
-                for i, seq in enumerate(atom_sequences)
-            ]
-            beams = self._exact_search(beams)
+            # Per-sequence exact search with a per-sequence wall-clock
+            # budget. If the budget expires before this atomization's
+            # search completes, we fall back to beam search for it (or
+            # use whatever exact completions were found, if any). This
+            # prevents one runaway atomization from blocking the batch.
+            timeout = self.exact_search_timeout
+            for i, seq in enumerate(atom_sequences):
+                seed = [
+                    _Beam(
+                        sequence=list(seq),
+                        total_badness=0,
+                        total_score=0,
+                        seq_index=i,
+                    )
+                ]
+                deadline = time.monotonic() + timeout if timeout > 0 else None
+                seq_beams, finished = self._exact_search(seed, deadline=deadline)
+                if not finished:
+                    if seq_beams:
+                        print(
+                            f"[parser] exact_search timed out for seq_idx={i}"
+                            f" after {timeout}s; using best completed beam",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"[parser] exact_search timed out for seq_idx={i}"
+                            f" after {timeout}s; falling back to beam search",
+                            file=sys.stderr,
+                        )
+                        seq_beams = self._beam_search_one_sequence(seq, i)
+                beams.extend(seq_beams)
         else:
             # Beam search: run each atomization in its own search so
             # alternatives don't compete for the same beam_width slots.
             # Otherwise a sequence whose optimum requires intermediate
             # states that score worse than a competitor at iteration t
             # gets pruned before its better final state is realized.
-            beams = []
             for i, seq in enumerate(atom_sequences):
                 beams.extend(self._beam_search_one_sequence(seq, i))
 
