@@ -1097,8 +1097,21 @@ class AlphaBetaParser(Parser):
                         distortion += abs(dep_d - hyper_d) * edge_size
         return distortion
 
-    def _candidate_token_atoms(self, edge: Hyperedge) -> frozenset[Atom]:
-        return frozenset(a for a in edge.all_atoms() if a in self.orig_atom)
+    def _candidate_dominance_atoms(self, edge: Hyperedge) -> frozenset:
+        # Token atoms contribute by their *original* (pre-argrole) UniqueAtom
+        # so two argrole variants of the same connector collapse to a single
+        # signature element — otherwise the strict-subset dominance check
+        # would never fire across candidates whose argroles differ.
+        # Rule-introduced special atoms (e.g. '+/B/.', ':/J/.') contribute by
+        # atom_str so a parse carrying an extra connector isn't dominated by
+        # one that lacks it.
+        sig: list = []
+        for a in edge.all_atoms():
+            if a in self.orig_atom:
+                sig.append(self.orig_atom[a])
+            else:
+                sig.append(a.atom_str)
+        return frozenset(sig)
 
     def _window_connected(self, edges: list[Hyperedge]) -> bool:
         atom_sets: list[list[Atom]] = [e.all_atoms() for e in edges]
@@ -1124,15 +1137,10 @@ class AlphaBetaParser(Parser):
         return True
 
     def _candidate_badness(self, edge: Hyperedge) -> int:
-        # 'no-argroles' is skipped: argroles are only assigned by
-        # _apply_arg_roles after the reduction loop, so every P/B
-        # connector trivially fires it mid-loop.
         total: int = 0
         try:
             for issues in edge.check_correctness().values():
-                for err_type, _msg in issues:
-                    if err_type == "no-argroles":
-                        continue
+                for _err_type, _msg in issues:
                     total += _BADNESS_WEIGHTS[0]
             for issues in check_structural_quality(edge).values():
                 for _err_type, _msg, severity in issues:
@@ -1156,7 +1164,7 @@ class AlphaBetaParser(Parser):
         # (score, new_edge, window_start, pos, badness, distortion)
         cand_actions: list[tuple[int, Hyperedge, int, int, int, int]] = []
         cand_records: list[RuleCandidate] = []
-        cand_tokens: list[frozenset[Atom]] = []
+        cand_signatures: list[frozenset] = []
         cand_conn: list[bool] = []
         cand_can_dominate: list[bool] = []
 
@@ -1165,6 +1173,21 @@ class AlphaBetaParser(Parser):
             for pos in range(window_start, len(beam.sequence)):
                 new_edge: Hyperedge | None = apply_rule(rule, beam.sequence, pos)
                 if new_edge and self._is_relcl_constraint_satisfied(new_edge):
+                    # Assign argroles to the candidate before badness so the
+                    # P/B argrole-aware checks see realistic connectors, then
+                    # resolve the '?' placeholders _apply_arg_roles leaves
+                    # behind on relations whose dep-tag didn't map to a
+                    # role. The argroled edge propagates into beam.sequence,
+                    # so later rule applications nest already-argroled
+                    # subedges (and the post-loop pass becomes idempotent).
+                    # Both helpers index self.atom2token by the bare Atom
+                    # identity stashed at parse_token time, so we have to
+                    # non_unique → apply → unique to keep beam.sequence
+                    # uniformly UniqueAtom-wrapped (the rest of _expand_beam
+                    # depends on that wrapping for orig_atom lookups).
+                    new_edge = unique(
+                        self._fix_argroles(self._apply_arg_roles(non_unique(new_edge)))
+                    )
                     window: list[Hyperedge] = beam.sequence[
                         pos - window_start : pos + 1
                     ]
@@ -1185,13 +1208,13 @@ class AlphaBetaParser(Parser):
                     cand_actions.append(
                         (score, new_edge, window_start, pos, bad, distortion)
                     )
-                    cand_tokens.append(self._candidate_token_atoms(new_edge))
+                    cand_signatures.append(self._candidate_dominance_atoms(new_edge))
                     cand_conn.append(self._window_connected(window))
                     cand_can_dominate.append(rule.can_dominate)
                 else:
                     base_iter.rejections.append((rule_number, pos))
 
-        # Drop A if there exists B != A with A's token-atoms a strict subset
+        # Drop A if there exists B != A with A's signature a strict subset
         # of B's AND both with the same connectivity status. Only candidates
         # whose rule has can_dominate=True can act as the dominator B.
         n: int = len(cand_actions)
@@ -1200,7 +1223,10 @@ class AlphaBetaParser(Parser):
             for j in range(n):
                 if i == j or not cand_can_dominate[j]:
                     continue
-                if cand_conn[i] == cand_conn[j] and cand_tokens[i] < cand_tokens[j]:
+                if (
+                    cand_conn[i] == cand_conn[j]
+                    and cand_signatures[i] < cand_signatures[j]
+                ):
                     keep[i] = False
                     break
         cand_actions = [cand_actions[i] for i in range(n) if keep[i]]

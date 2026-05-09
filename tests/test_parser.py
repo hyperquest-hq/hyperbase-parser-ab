@@ -6,7 +6,7 @@ import pytest
 from hyperbase import hedge
 from hyperbase.hyperedge import UniqueAtom
 
-from hyperbase_parser_ab.parser import AlphaBetaParser
+from hyperbase_parser_ab.parser import _BADNESS_WEIGHTS, AlphaBetaParser
 
 
 class TestParserInitErrors:
@@ -349,7 +349,8 @@ class TestParserBeamSearch:
         assert len(result) == 1
         assert failed is False
         # Rule("C", {"C"}, 2, "+/B/.") fires, building the +/B builder
-        assert str(result[0]).startswith("(+/B/.")
+        # (argroles are assigned in-loop, so the builder carries them already)
+        assert str(result[0]).startswith("(+/B.")
 
     def test_beam_width_three_reduces_two_concepts(self):
         parser = _make_parser()
@@ -394,14 +395,15 @@ class TestParserCandidateBadness:
         assert edge is not None
         assert parser._candidate_badness(edge) == 0
 
-    def test_no_argroles_is_ignored(self):
-        """A P/B connector with no argroles fires 'no-argroles' (sev 0)
-        but argroles are only assigned post-loop, so this issue must be
-        skipped during candidate badness scoring."""
+    def test_no_argroles_now_counts(self):
+        """Argroles are assigned to candidates inside _expand_beam, so by
+        the time _candidate_badness runs the connector should already carry
+        argroles. A connector that still lacks them is genuinely malformed
+        and 'no-argroles' (sev 0, weight 1000) should contribute."""
         parser = _make_parser()
         edge = hedge("(runs/Pd/en cat/Cc/en dog/Cc/en)")
         assert edge is not None
-        assert parser._candidate_badness(edge) == 0
+        assert parser._candidate_badness(edge) >= _BADNESS_WEIGHTS[0]
 
     def test_other_argrole_issues_still_count(self):
         """Only 'no-argroles' is filtered. A duplicate-argrole-s issue
