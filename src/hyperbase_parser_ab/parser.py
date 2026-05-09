@@ -1210,7 +1210,9 @@ class AlphaBetaParser(Parser):
         for rule_number, rule in enumerate(RULES):
             window_start: int = rule.size - 1
             for pos in range(window_start, len(beam.sequence)):
-                new_edge: Hyperedge | None = apply_rule(rule, beam.sequence, pos)
+                new_edge: Hyperedge | None = apply_rule(
+                    rule, beam.sequence, pos, self.atom2token
+                )
                 if new_edge and self._is_relcl_constraint_satisfied(new_edge):
                     # Assign argroles to the candidate before badness so the
                     # P/B argrole-aware checks see realistic connectors, then
