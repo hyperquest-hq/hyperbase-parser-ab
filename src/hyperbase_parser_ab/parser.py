@@ -559,7 +559,7 @@ class AlphaBetaParser(Parser):
             "oprd",
             "acomp",
             "attr",
-            "ROOT",
+            # "ROOT",
             "oa",
             "pd",
             # clausal complement, these are probably going to be nested relations
@@ -1451,12 +1451,7 @@ class AlphaBetaParser(Parser):
         if edge.cmt == "P":
             ars: str = edge.argroles()
             ar: str | None = None
-            if "p" in ars:
-                if "a" not in ars:
-                    ar = "a"
-            elif "a" in ars:
-                ar = "p"
-            elif "s" not in ars:
+            if "s" not in ars:
                 ar = "s"
             elif "o" not in ars:
                 ar = "o"
@@ -1515,8 +1510,14 @@ class AlphaBetaParser(Parser):
             _ars: str = ""
             for ar, subedge in zip(ars, edge[1:], strict=True):
                 _ar: str = ar
-                if ar == "?" and subedge.mt in {"R", "S"}:
-                    _ar = "x"
+                if ar == "?":
+                    if subedge.mt in {"R", "S"}:
+                        _ar = "x"
+                    elif subedge.mt == "C":
+                        if "s" not in ars:
+                            _ar = "s"
+                        elif "o" not in ars:
+                            _ar = "o"
                 _ars += _ar
             return self._replace_argroles(edge, _ars)
         return edge
