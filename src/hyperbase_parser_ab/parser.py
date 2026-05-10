@@ -27,7 +27,7 @@ from spacy.tokens import Doc, Span, Token
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import SPACY_MODELS
-from hyperbase_parser_ab.rules import RULES, apply_rule
+from hyperbase_parser_ab.rules import RULES, Rule, apply_rule_indices
 from hyperbase_parser_ab.trace import (
     AtomTrace,
     ParseTrace,
@@ -219,6 +219,42 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
+            "non_contig_max_gap": {
+                "type": int,
+                "default": 2,
+                "description": (
+                    "Max number of skipped sequence elements summed across "
+                    "all gaps in a non-contiguous rule application window. "
+                    "0 disables non-contiguous reductions entirely "
+                    "and the parser behaves identically to the contiguous-"
+                    "only baseline. Set to e.g. 2 (default) to allow rules to combine "
+                    "elements separated by up to 2 intervening elements, "
+                    "gated by a hard dep-connectivity precondition."
+                ),
+                "required": False,
+            },
+            "non_contig_max_rule_size": {
+                "type": int,
+                "default": 3,
+                "description": (
+                    "Only rules whose size is <= this value are eligible "
+                    "for non-contiguous application. Higher-arity rules "
+                    "always go through the contiguous path. Only used when "
+                    "non_contig_max_gap > 0."
+                ),
+                "required": False,
+            },
+            "non_contig_distortion_penalty": {
+                "type": int,
+                "default": 100,
+                "description": (
+                    "Added to the candidate's distortion per skipped "
+                    "element when a rule is applied non-contiguously. "
+                    "Biases the search toward contiguous reductions when "
+                    "both succeed. Only used when non_contig_max_gap > 0."
+                ),
+                "required": False,
+            },
         }
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
@@ -241,6 +277,15 @@ class AlphaBetaParser(Parser):
         )
         self.n_workers: int = max(1, int(self.params.get("n_workers", 1)))
         self._worker_pool: ProcessPoolExecutor | None = None
+        self.non_contig_max_gap: int = max(
+            0, int(self.params.get("non_contig_max_gap", 0))
+        )
+        self.non_contig_max_rule_size: int = max(
+            0, int(self.params.get("non_contig_max_rule_size", 3))
+        )
+        self.non_contig_distortion_penalty: int = max(
+            0, int(self.params.get("non_contig_distortion_penalty", 100))
+        )
 
         models: list[str] = SPACY_MODELS[self.lang]
 
@@ -1186,6 +1231,41 @@ class AlphaBetaParser(Parser):
             return _BADNESS_CRASH_PENALTY
         return total
 
+    def _non_contig_index_tuples(
+        self, size: int, seq_len: int
+    ) -> list[tuple[int, ...]]:
+        # Yield strictly non-contiguous index tuples of `size` strictly-
+        # increasing positions in [0, seq_len), with at least one gap and
+        # total skipped elements <= self.non_contig_max_gap. The all-
+        # contiguous tuple is excluded — the contiguous loop already
+        # covers it.
+        max_gap: int = self.non_contig_max_gap
+        if max_gap <= 0 or size < 2 or seq_len < size + 1:
+            return []
+        out: list[tuple[int, ...]] = []
+        if size == 2:
+            for i in range(seq_len - 2):
+                # j - i - 1 = number of skipped elements between i and j.
+                # Skip j == i + 1 (contiguous), allow j - i in [2, max_gap+1].
+                for j in range(i + 2, min(seq_len, i + 2 + max_gap)):
+                    out.append((i, j))
+        elif size == 3:
+            for i in range(seq_len - 2):
+                for j in range(i + 1, seq_len - 1):
+                    for k in range(j + 1, seq_len):
+                        skipped: int = (k - i + 1) - 3
+                        if skipped <= 0:
+                            # All-contiguous (j == i+1 and k == j+1) — skip.
+                            continue
+                        if skipped > max_gap:
+                            continue
+                        out.append((i, j, k))
+        else:
+            # Higher arities go through the contiguous path only — the
+            # plan caps non-contig at size 3 by default.
+            return []
+        return out
+
     def _expand_beam(
         self,
         beam: _Beam,
@@ -1198,64 +1278,93 @@ class AlphaBetaParser(Parser):
         )
         # Parallel lists kept in lockstep until the dominance filter.
         # Per-candidate tuple:
-        # (score, new_edge, window_start, pos, badness, distortion)
-        cand_actions: list[tuple[int, Hyperedge, int, int, int, int]] = []
+        # (score, new_edge, indices, badness, distortion)
+        # `indices` holds the positions in beam.sequence consumed by the
+        # rule, in left-to-right order; for contiguous applications it's a
+        # contiguous range, for non-contig it's a strictly-increasing tuple
+        # with gaps. The new edge is placed at indices[-1] and the other
+        # positions are dropped.
+        cand_actions: list[tuple[int, Hyperedge, tuple[int, ...], int, int]] = []
         cand_records: list[RuleCandidate] = []
         cand_signatures: list[frozenset] = []
         cand_conn: list[bool] = []
         cand_can_dominate: list[bool] = []
         cand_mandatory: list[bool] = []
 
+        def _try_candidate(
+            rule_number: int,
+            rule: Rule,
+            indices: tuple[int, ...],
+            extra_distortion: int = 0,
+        ) -> bool:
+            new_edge: Hyperedge | None = apply_rule_indices(
+                rule, beam.sequence, list(indices), self.atom2token
+            )
+            if not new_edge or not self._is_relcl_constraint_satisfied(new_edge):
+                return False
+            # Assign argroles to the candidate before badness so the
+            # P/B argrole-aware checks see realistic connectors, then
+            # resolve the '?' placeholders _apply_arg_roles leaves
+            # behind on relations whose dep-tag didn't map to a
+            # role. The argroled edge propagates into beam.sequence,
+            # so later rule applications nest already-argroled
+            # subedges (and the post-loop pass becomes idempotent).
+            # Both helpers index self.atom2token by the bare Atom
+            # identity stashed at parse_token time, so we have to
+            # non_unique → apply → unique to keep beam.sequence
+            # uniformly UniqueAtom-wrapped (the rest of _expand_beam
+            # depends on that wrapping for orig_atom lookups).
+            new_edge = unique(
+                self._fix_argroles(self._apply_arg_roles(non_unique(new_edge)))
+            )
+            window: list[Hyperedge] = [beam.sequence[k] for k in indices]
+            score: int = self._score(window) + self._plus_builder_bonus(new_edge)
+            bad: int = self._candidate_badness(new_edge)
+            distortion: int = (
+                self._distance_distortion_delta(new_edge) + extra_distortion
+            )
+            cand_records.append(
+                RuleCandidate(
+                    rule_index=rule_number,
+                    rule_repr=rule_repr(rule, rule_number),
+                    pos=indices[-1],
+                    score=score,
+                    new_edge_repr=str(new_edge),
+                    badness=bad,
+                    distortion=distortion,
+                    indices=list(indices),
+                )
+            )
+            cand_actions.append((score, new_edge, indices, bad, distortion))
+            cand_signatures.append(self._candidate_dominance_atoms(new_edge))
+            cand_conn.append(self._window_connected(window))
+            cand_can_dominate.append(rule.can_dominate)
+            cand_mandatory.append(rule.mandatory)
+            return True
+
         for rule_number, rule in enumerate(RULES):
             window_start: int = rule.size - 1
             for pos in range(window_start, len(beam.sequence)):
-                new_edge: Hyperedge | None = apply_rule(
-                    rule, beam.sequence, pos, self.atom2token
-                )
-                if new_edge and self._is_relcl_constraint_satisfied(new_edge):
-                    # Assign argroles to the candidate before badness so the
-                    # P/B argrole-aware checks see realistic connectors, then
-                    # resolve the '?' placeholders _apply_arg_roles leaves
-                    # behind on relations whose dep-tag didn't map to a
-                    # role. The argroled edge propagates into beam.sequence,
-                    # so later rule applications nest already-argroled
-                    # subedges (and the post-loop pass becomes idempotent).
-                    # Both helpers index self.atom2token by the bare Atom
-                    # identity stashed at parse_token time, so we have to
-                    # non_unique → apply → unique to keep beam.sequence
-                    # uniformly UniqueAtom-wrapped (the rest of _expand_beam
-                    # depends on that wrapping for orig_atom lookups).
-                    new_edge = unique(
-                        self._fix_argroles(self._apply_arg_roles(non_unique(new_edge)))
-                    )
-                    window: list[Hyperedge] = beam.sequence[
-                        pos - window_start : pos + 1
-                    ]
-                    score: int = self._score(window) + self._plus_builder_bonus(
-                        new_edge
-                    )
-                    bad: int = self._candidate_badness(new_edge)
-                    distortion: int = self._distance_distortion_delta(new_edge)
-                    cand_records.append(
-                        RuleCandidate(
-                            rule_index=rule_number,
-                            rule_repr=rule_repr(rule, rule_number),
-                            pos=pos,
-                            score=score,
-                            new_edge_repr=str(new_edge),
-                            badness=bad,
-                            distortion=distortion,
-                        )
-                    )
-                    cand_actions.append(
-                        (score, new_edge, window_start, pos, bad, distortion)
-                    )
-                    cand_signatures.append(self._candidate_dominance_atoms(new_edge))
-                    cand_conn.append(self._window_connected(window))
-                    cand_can_dominate.append(rule.can_dominate)
-                    cand_mandatory.append(rule.mandatory)
-                else:
+                indices: tuple[int, ...] = tuple(range(pos - window_start, pos + 1))
+                if not _try_candidate(rule_number, rule, indices):
                     base_iter.rejections.append((rule_number, pos))
+
+        # Non-contiguous applications: gated by self.non_contig_max_gap > 0
+        # and a hard dep-connectivity precondition on the window.
+        if self.non_contig_max_gap > 0:
+            for rule_number, rule in enumerate(RULES):
+                if rule.size > self.non_contig_max_rule_size:
+                    continue
+                for indices in self._non_contig_index_tuples(
+                    rule.size, len(beam.sequence)
+                ):
+                    window = [beam.sequence[k] for k in indices]
+                    if not self._window_connected(window):
+                        continue
+                    skipped: int = (indices[-1] - indices[0] + 1) - len(indices)
+                    extra: int = skipped * self.non_contig_distortion_penalty
+                    if not _try_candidate(rule_number, rule, indices, extra):
+                        base_iter.rejections.append((rule_number, indices[-1]))
 
         # Drop A if there exists B != A with A's signature a strict subset
         # of B's AND both with the same connectivity status. Only candidates
@@ -1297,13 +1406,13 @@ class AlphaBetaParser(Parser):
                 )
             ]
 
-        indexed: list[tuple[int, tuple[int, Hyperedge, int, int, int, int]]] = list(
-            enumerate(cand_actions)
+        indexed: list[tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int]]] = (
+            list(enumerate(cand_actions))
         )
         # Sort by (badness ASC, score DESC) to determine first place. A
         # mandatory rule that ranks first short-circuits both pruning modes:
         # only that single candidate survives, every alternative is dropped.
-        indexed.sort(key=lambda ic: (ic[1][4], -ic[1][0]))
+        indexed.sort(key=lambda ic: (ic[1][3], -ic[1][0]))
         if indexed and cand_mandatory[indexed[0][0]]:
             top = [indexed[0]]
         elif prune:
@@ -1319,8 +1428,8 @@ class AlphaBetaParser(Parser):
                 ia
                 for ia in indexed
                 if (
-                    beam.total_badness + ia[1][4],
-                    beam.total_distortion + ia[1][5],
+                    beam.total_badness + ia[1][3],
+                    beam.total_distortion + ia[1][4],
                 )
                 <= best_so_far
             ]
@@ -1329,8 +1438,7 @@ class AlphaBetaParser(Parser):
         for cand_idx, (
             score,
             new_edge,
-            window_start,
-            pos,
+            indices,
             bad,
             distortion,
         ) in top:
@@ -1347,16 +1455,19 @@ class AlphaBetaParser(Parser):
                         badness=c.badness,
                         distortion=c.distortion,
                         is_winner=(i == cand_idx),
+                        indices=list(c.indices) if c.indices is not None else None,
                     )
                     for i, c in enumerate(base_iter.candidates)
                 ],
                 rejections=list(base_iter.rejections),
                 fallback_used=False,
             )
+            last_idx: int = indices[-1]
+            drop: set[int] = set(indices[:-1])
             new_sequence = [
-                *beam.sequence[: pos - window_start],
-                new_edge,
-                *beam.sequence[pos + 1 :],
+                new_edge if k == last_idx else e
+                for k, e in enumerate(beam.sequence)
+                if k not in drop
             ]
             extensions.append(
                 _Beam(

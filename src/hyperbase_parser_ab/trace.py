@@ -34,6 +34,7 @@ class RuleCandidate:
     badness: int = 0
     distortion: int = 0
     is_winner: bool = False
+    indices: list[int] | None = None
 
 
 @dataclass
