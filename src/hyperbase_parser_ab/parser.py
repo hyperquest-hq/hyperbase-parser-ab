@@ -150,6 +150,7 @@ class AlphaBetaParser(Parser):
                 "default": False,
                 "description": "Enable debug message output.",
                 "required": False,
+                "reload": False,
             },
             "lang_namespace": {
                 "type": bool,
@@ -193,6 +194,7 @@ class AlphaBetaParser(Parser):
                     "one at the end (tie-broken by total score)."
                 ),
                 "required": False,
+                "reload": False,
             },
             "exact_search": {
                 "type": bool,
@@ -205,6 +207,7 @@ class AlphaBetaParser(Parser):
                     "fast when low-badness parses are easy to find."
                 ),
                 "required": False,
+                "reload": False,
             },
             "exact_search_timeout": {
                 "type": float,
@@ -217,6 +220,7 @@ class AlphaBetaParser(Parser):
                     "timeout. Only used when exact_search=True."
                 ),
                 "required": False,
+                "reload": False,
             },
             "n_workers": {
                 "type": int,
@@ -247,6 +251,7 @@ class AlphaBetaParser(Parser):
                     "every eligible token uncertain."
                 ),
                 "required": False,
+                "reload": False,
             },
             "post_processing": {
                 "type": bool,
@@ -259,8 +264,16 @@ class AlphaBetaParser(Parser):
                     "unchanged. Useful for debugging the search output."
                 ),
                 "required": False,
+                "reload": False,
             },
         }
+
+    def apply_live_setting(self, name: str, value: Any) -> None:  # noqa: ANN401
+        if name == "beam_width":
+            value = max(1, int(value))
+        elif name == "uncertain_atom_ratio":
+            value = min(1.0, max(0.0, float(value)))
+        super().apply_live_setting(name, value)
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         super().__init__(params)
