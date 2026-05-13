@@ -22,6 +22,7 @@ class AtomTrace:
     dropped: bool
     top_candidates: list[tuple[str, float]] = field(default_factory=list)
     chosen_label_rank: int = 0
+    is_uncertain: bool = False
 
 
 @dataclass
@@ -42,8 +43,33 @@ class RuleIteration:
     iteration: int
     sequence_repr: list[str]
     candidates: list[RuleCandidate] = field(default_factory=list)
-    rejections: list[tuple[int, int]] = field(default_factory=list)
+    dominated: list[RuleCandidate] = field(default_factory=list)
     fallback_used: bool = False
+
+
+@dataclass
+class SubstitutionTrial:
+    tok_idx: int
+    token_text: str
+    label_from: str
+    label_to: str
+    badness: int
+    distortion: int
+    score: int
+    edge_repr: str
+    is_winner: bool = False
+    number: int = 0
+    substitutions: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass
+class SubstitutionRound:
+    round_idx: int
+    seed_badness: int
+    seed_distortion: int
+    seed_score: int
+    trials: list[SubstitutionTrial] = field(default_factory=list)
+    improved: bool = False
 
 
 @dataclass
@@ -52,6 +78,9 @@ class ParseTrace:
     iterations: list[RuleIteration] = field(default_factory=list)
     post_processing: list[tuple[str, str]] = field(default_factory=list)
     final_badness: dict[str, list[tuple[str, str, int]]] = field(default_factory=dict)
+    total_badness: int = 0
+    total_distortion: int = 0
+    substitution_rounds: list[SubstitutionRound] = field(default_factory=list)
 
 
 def rule_repr(rule: Rule, index: int) -> str:

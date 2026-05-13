@@ -15,6 +15,8 @@ class Rule:
         can_dominate: bool = True,
         mandatory: bool = False,
         dep_blockers: set[str] | None = None,
+        consecutive_siblings_ok: bool = False,
+        relaxed_head_satisfaction: bool = True,
     ) -> None:
         self.first_type: str = first_type
         self.arg_types: set[str] = arg_types
@@ -23,14 +25,24 @@ class Rule:
         self.can_dominate: bool = can_dominate
         self.mandatory: bool = mandatory
         self.dep_blockers: set[str] | None = dep_blockers
+        self.consecutive_siblings_ok: bool = consecutive_siblings_ok
+        self.relaxed_head_satisfaction: bool = relaxed_head_satisfaction
         self._branches: int = 0
 
 
 RULES: list[Rule] = [
     Rule("C", {"C"}, 2, "+/B/.", mandatory=True, dep_blockers={"conj"}),
-    Rule("C", {"R"}, 2, ":/J/."),
-    Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
-    Rule("B", {"C", "R"}, 3),
+    Rule(
+        "C",
+        {"C", "R"},
+        2,
+        ":/J/.",
+        consecutive_siblings_ok=True,
+        relaxed_head_satisfaction=True,
+    ),
+    # Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
+    Rule("M", {"C", "M", "T", "P"}, 2),
+    Rule("B", {"C"}, 3),
     Rule("T", {"C", "R"}, 2),
     Rule("P", {"C", "R", "S"}, 6),
     Rule("P", {"C", "R", "S"}, 5),
@@ -39,8 +51,9 @@ RULES: list[Rule] = [
     Rule("P", {"C", "R", "S"}, 2),
     # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3, can_dominate=False),
     # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2, can_dominate=False),
-    Rule("J", {"C", "R"}, 3, can_dominate=False),
-    Rule("J", {"C", "R"}, 2, can_dominate=False),
+    Rule("J", {"R"}, 3, can_dominate=False),
+    Rule("J", {"C"}, 3, can_dominate=False),
+    # Rule("J", {"C", "R"}, 2, can_dominate=False),
 ]
 
 

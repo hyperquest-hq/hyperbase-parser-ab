@@ -308,6 +308,28 @@ class TestParserBeamSearch:
         parser.token2atom = {}
         parser._cur_trace = None
 
+    @staticmethod
+    def _wire_dep_chain(parser, atoms):
+        # Wire a dep-tree chain: atoms[0] is the parent, atoms[1] its
+        # only dep-child, etc. Sets the bare attributes the new dep-tree
+        # candidate generator and its downstream helpers touch:
+        #   .children — used by _live_dep_children
+        #   .i        — used by _plus_builder_bonus
+        #   .sent     — walked by _no_dangling_branches; an empty list
+        #               makes the loop a no-op so the bonus always fires.
+        tokens = []
+        for i, _atom in enumerate(atoms):
+            tok = MagicMock()
+            tok.i = i
+            tok.sent = []
+            tokens.append(tok)
+        for i in range(len(tokens) - 1):
+            tokens[i].children = [tokens[i + 1]]
+        tokens[-1].children = []
+        for atom, tok in zip(atoms, tokens, strict=False):
+            parser.atom2token[atom] = tok
+        return tokens
+
     def test_default_beam_width(self):
         parser = _make_parser()
         assert parser.beam_width == 5
@@ -344,7 +366,13 @@ class TestParserBeamSearch:
         atom_b = hedge("dog/Cc/en")
         assert atom_a is not None
         assert atom_b is not None
-        result, failed, _ = parser._parse_atom_sequence([[atom_a, atom_b]])
+        self._wire_dep_chain(parser, [atom_a, atom_b])
+        best_beam, _substituted, _rounds = parser._hill_climb_atomization(
+            [atom_a, atom_b], []
+        )
+        assert best_beam is not None
+        result = best_beam.sequence
+        failed = best_beam.failed
         assert result is not None
         assert len(result) == 1
         assert failed is False
@@ -360,7 +388,13 @@ class TestParserBeamSearch:
         atom_b = hedge("dog/Cc/en")
         assert atom_a is not None
         assert atom_b is not None
-        result, failed, _ = parser._parse_atom_sequence([[atom_a, atom_b]])
+        self._wire_dep_chain(parser, [atom_a, atom_b])
+        best_beam, _substituted, _rounds = parser._hill_climb_atomization(
+            [atom_a, atom_b], []
+        )
+        assert best_beam is not None
+        result = best_beam.sequence
+        failed = best_beam.failed
         assert result is not None
         assert len(result) == 1
         assert failed is False
@@ -377,7 +411,9 @@ class TestParserBeamSearch:
         atoms = [hedge("a/Cc/en"), hedge("b/Cc/en"), hedge("c/Cc/en")]
         for a in atoms:
             assert a is not None
-        result, _failed, _ = parser._parse_atom_sequence([atoms])
+        best_beam, _substituted, _rounds = parser._hill_climb_atomization(atoms, [])
+        assert best_beam is not None
+        result = best_beam.sequence
         assert result is not None
         assert len(result) == 1
 
