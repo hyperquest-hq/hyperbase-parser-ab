@@ -1789,6 +1789,38 @@ class AlphaBetaParser(Parser):
                 continue
             if relaxed and ua_parent in _head_set(i_p) and ua_child in _head_set(i_c):
                 continue
+            # Sibling-modifier-on-predicate route. A locked-in DPT pair
+            # (C, M) is considered satisfied when M's subtype is
+            # predicate-attaching (Mn/Mm/Mx) and C has a DPT child P of
+            # P-type that sits in the same immediate child of new_edge
+            # as M, with M positionally above P. This covers the (M P)
+            # construction where M was applied directly to a sibling
+            # predicate: head(M P) = P, so the local undirected pairs
+            # of any enclosing edge only contain {C, P} and never
+            # {C, M} — M attaches to C implicitly via the buried
+            # sibling P. Noun-attaching subtypes (Ma/Md/Mq/Mp) are
+            # excluded — they should remain bound to C and the
+            # unsatisfied pair is a real distortion.
+            if ua_child.t in {"Mn", "Mm", "Mx"}:
+                m_tok = self.atom2token.get(ua_child)
+                if m_tok is not None:
+                    co_located: set[UniqueAtom] = child_atoms[i_c]
+                    sibling_match: bool = False
+                    for ua_sib in self._dpt_children_of.get(ua_parent, set()):
+                        if ua_sib == ua_child:
+                            continue
+                        if ua_sib not in co_located:
+                            continue
+                        if ua_sib.mtype() != "P":
+                            continue
+                        p_tok = self.atom2token.get(ua_sib)
+                        if p_tok is None:
+                            continue
+                        if m_tok.i < p_tok.i:
+                            sibling_match = True
+                            break
+                    if sibling_match:
+                        continue
             distortion += 1
 
         # Criterion 3.12 — X/J separator straddling lock-in.
@@ -2239,6 +2271,49 @@ class AlphaBetaParser(Parser):
             pos: sorted(_live_dep_children(pos)) for pos in range(len(state.sequence))
         }
 
+        # Sibling-modifier-over-predicate virtual pairs. For each
+        # modifier atom M in some position, find any DPT sibling P (a
+        # predicate, also a DPT child of M's parent C) at a different
+        # position where M is positionally above P. Each such (m_pos,
+        # p_pos) pair becomes a virtual size-2 candidate available
+        # *only* to the size-2 M rule (rule #2). We deliberately do
+        # NOT add these to children_of, because that would let the
+        # generic DFS traverse the virtual edge into larger subtrees
+        # and feed unrelated rules (e.g. a size-3 P rule) candidates
+        # whose internal structure isn't justified by the DPT.
+        # _distortion_delta has a matching satisfaction route that
+        # keeps the outer-edge (C, M) lock-in from charging when the
+        # resulting (M P) edge gets folded into a larger edge
+        # containing C.
+        # Only predicate-attaching modifier subtypes are eligible to
+        # promote to a sibling predicate: Mn (negation), Mm (modal),
+        # Mx (adverbial). Noun-attaching subtypes (Ma adjective, Md
+        # determiner, Mq number, Mp possessive) are excluded — they
+        # belong to the parent concept, not the sibling predicate.
+        predicate_attaching_m = {"Mn", "Mm", "Mx"}
+        sibling_m_pairs: dict[int, set[int]] = {}
+        for pos in range(len(state.sequence)):
+            for a in state.sequence[pos].all_atoms():
+                ua_m = self.orig_atom.get(a)
+                if ua_m is None or ua_m.t not in predicate_attaching_m:
+                    continue
+                m_tok = self.atom2token.get(ua_m)
+                if m_tok is None:
+                    continue
+                ua_c = self._dpt_parent_of.get(ua_m)
+                if ua_c is None:
+                    continue
+                for ua_sib in self._dpt_children_of.get(ua_c, set()):
+                    if ua_sib == ua_m or ua_sib.mtype() != "P":
+                        continue
+                    sib_tok = self.atom2token.get(ua_sib)
+                    if sib_tok is None or m_tok.i >= sib_tok.i:
+                        continue
+                    sib_pos = tok2pos.get(sib_tok)
+                    if sib_pos is None or sib_pos == pos:
+                        continue
+                    sibling_m_pairs.setdefault(pos, set()).add(sib_pos)
+
         # Per-position DPT-parent coverage. A position "covers" a DPT
         # parent atom P if any atom inside it is a direct dep-child of P.
         # dpt_sibling_positions[P] is the sorted list of all positions
@@ -2327,6 +2402,18 @@ class AlphaBetaParser(Parser):
                 for st in by_size.get(rule.size, []):
                     indices: tuple[int, ...] = tuple(sorted(st))
                     _try_candidate(rule_number, rule, indices, parent_pos)
+
+        # Sibling-modifier-on-predicate exception. For each (m_pos,
+        # p_pos) pair collected above, fire size-2 M rules only.
+        # Restricted to M-rules so we don't open up unrelated rules
+        # to candidates whose indices aren't DPT-connected.
+        for rule_number, rule in enumerate(RULES):
+            if rule.first_type != "M" or rule.size != 2:
+                continue
+            for m_pos, p_positions in sibling_m_pairs.items():
+                for p_pos in p_positions:
+                    indices = tuple(sorted([m_pos, p_pos]))
+                    _try_candidate(rule_number, rule, indices, m_pos)
 
         # Sibling-pair exception. Rules flagged with
         # consecutive_siblings_ok may additionally fire on a pair of
