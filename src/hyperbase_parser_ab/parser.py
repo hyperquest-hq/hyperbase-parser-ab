@@ -283,6 +283,14 @@ class AlphaBetaParser(Parser):
         self._dpt_directed: set[tuple[UniqueAtom, UniqueAtom]] = set()
         self._dpt_parent_of: dict[UniqueAtom, UniqueAtom] = {}
         self._dpt_children_of: dict[UniqueAtom, set[UniqueAtom]] = {}
+        # Criterion 3.12 — X/J separator splits per DPT parent. Each
+        # entry maps a parent atom to a list of (left_set, right_set)
+        # pairs, one per X- or J-labeled separator in the parent's
+        # spaCy children sequence. `left_set` always contains the parent
+        # atom (parent belongs to the first separated group).
+        self._dpt_separators: dict[
+            UniqueAtom, list[tuple[frozenset[UniqueAtom], frozenset[UniqueAtom]]]
+        ] = {}
         # Atoms found to be "stranded" — i.e. left bare at the top of the
         # final hyperedge or force-joined via the :/J/. iteration-level
         # fallback — at a previous pass of the current parse. Drives the
@@ -537,6 +545,7 @@ class AlphaBetaParser(Parser):
 
             self._compute_depths_and_connections(sent.root)
             self._compute_dpt_pairs()
+            self._compute_dpt_separators(sent.root)
 
             # Replay path (used by the REPL `/sub <number>` command):
             # patch the seed at the requested positions and skip
@@ -1287,6 +1296,79 @@ class AlphaBetaParser(Parser):
             self._dpt_parent_of[ua_child] = ua_parent
             self._dpt_children_of.setdefault(ua_parent, set()).add(ua_child)
 
+    def _compute_dpt_separators(self, root: Token) -> None:
+        # Criterion 3.12 precomputation. For each spaCy token T whose
+        # canonical atom is in the DPT, walk T's spaCy children in
+        # order and split that sequence on X-labeled (dropped) and
+        # J-labeled (conjunction) children — each such child is a
+        # *separator*. For every separator we record (left_set,
+        # right_set), where each side is the union of canonical atoms
+        # in the subtrees of the non-separator children on that side
+        # of the separator; the parent atom is added to left_set
+        # ("parent belongs to the first separated group"). Separator
+        # children's own subtrees contribute to neither side.
+        #
+        # Walks spaCy directly (not the DPT) because X-tokens are
+        # dropped from token2atom and would otherwise be invisible.
+        self._dpt_separators = {}
+
+        def is_sep(tok: Token) -> bool:
+            # X (dropped): not in token2atom.
+            if tok not in self.token2atom:
+                return True
+            ua = self.orig_atom.get(self.token2atom[tok])
+            # J (conjunction): mtype == "J".
+            return ua is not None and ua.mtype() == "J"
+
+        def subtree_atoms(tok: Token) -> set[UniqueAtom]:
+            out: set[UniqueAtom] = set()
+            for d in tok.subtree:
+                a = self.token2atom.get(d)
+                if a is None:
+                    continue
+                ua = self.orig_atom.get(a)
+                if ua is not None:
+                    out.add(ua)
+            return out
+
+        for tok in root.subtree:
+            a = self.token2atom.get(tok)
+            if a is None:
+                continue
+            parent_ua = self.orig_atom.get(a)
+            if parent_ua is None:
+                continue
+            children: list[Token] = list(tok.children)
+            sep_positions: list[int] = [i for i, c in enumerate(children) if is_sep(c)]
+            if not sep_positions:
+                continue
+            child_sub: list[frozenset[UniqueAtom]] = [
+                frozenset() if is_sep(c) else frozenset(subtree_atoms(c))
+                for c in children
+            ]
+            pairs: list[tuple[frozenset[UniqueAtom], frozenset[UniqueAtom]]] = []
+            for i in sep_positions:
+                left: set[UniqueAtom] = {parent_ua}
+                for j in range(i):
+                    left |= child_sub[j]
+                right: set[UniqueAtom] = set()
+                for j in range(i + 1, len(children)):
+                    right |= child_sub[j]
+                # No atoms on either side → no candidate can ever
+                # straddle this separator. Skip to keep the per-edge
+                # scan in _distortion_delta lean.
+                if not right:
+                    continue
+                if len(left) == 1 and parent_ua in left:
+                    # Only the parent on the left — a leading separator.
+                    # A candidate that places the parent and any right-
+                    # side atom in different children of a new edge
+                    # would still straddle, so we keep the split.
+                    pass
+                pairs.append((frozenset(left), frozenset(right)))
+            if pairs:
+                self._dpt_separators[parent_ua] = pairs
+
     def _score(
         self, edges: list[Hyperedge], new_edge: Hyperedge, parent_pos: int
     ) -> tuple[int, bool]:
@@ -1672,6 +1754,45 @@ class AlphaBetaParser(Parser):
             if relaxed and ua_parent in _head_set(i_p) and ua_child in _head_set(i_c):
                 continue
             distortion += 1
+
+        # Criterion 3.12 — X/J separator straddling lock-in.
+        # For each precomputed (left_set, right_set) split at some DPT
+        # parent's children level, locate the first immediate child of
+        # new_edge whose atoms hit left_set and the first that hits
+        # right_set. If both are present in *different* immediate
+        # children, this edge is the lock-in for that separator (no
+        # smaller edge already contained both sides in its own
+        # immediate children). Charge +1 iff the parent's side
+        # (left_set, which always contains the parent atom) has
+        # remainder atoms not present anywhere in new_edge's atoms.
+        # Charging only on left-side remainder matches the user's
+        # rule: the parent belongs to the first separated group, and
+        # the criterion penalises a candidate that reaches across the
+        # separator while leaving the parent's own group incomplete.
+        # Right-side remainder is fine — it just means the candidate
+        # is building the parent's argument list incrementally and
+        # the still-unattached right-side sibling will be folded in
+        # by a later edge.
+        if self._dpt_separators:
+            new_edge_atoms: set[UniqueAtom] = set()
+            for s in child_atoms:
+                new_edge_atoms |= s
+            for sep_list in self._dpt_separators.values():
+                for left_set, right_set in sep_list:
+                    if not (left_set - new_edge_atoms):
+                        continue
+                    i_left: int = -1
+                    i_right: int = -1
+                    for idx, atoms in enumerate(child_atoms):
+                        if i_left < 0 and atoms & left_set:
+                            i_left = idx
+                        if i_right < 0 and atoms & right_set:
+                            i_right = idx
+                        if i_left >= 0 and i_right >= 0:
+                            break
+                    if i_left < 0 or i_right < 0 or i_left == i_right:
+                        continue
+                    distortion += 1
         return distortion
 
     def diagnose_distortion(self, edge: Hyperedge) -> list[str]:
