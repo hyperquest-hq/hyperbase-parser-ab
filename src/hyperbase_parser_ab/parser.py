@@ -661,10 +661,6 @@ class AlphaBetaParser(Parser):
             atom2word: dict[Atom, tuple[str, int]] = {}
             if edge:
                 if self._post_processing_enabled():
-                    edge = self._apply_arg_roles(edge)
-                    self.debug_msg(f"After applying argument roles: {edge!s}")
-                    if self._cur_trace is not None:
-                        self._cur_trace.post_processing.append(("arg_roles", str(edge)))
                     edge = self._deepen_modifiers(edge)
                     self.debug_msg(f"After deepening modifiers: {edge!s}")
                     if self._cur_trace is not None:
