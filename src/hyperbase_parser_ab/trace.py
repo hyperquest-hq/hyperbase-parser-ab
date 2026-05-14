@@ -81,6 +81,10 @@ class ParseTrace:
     total_badness: int = 0
     total_distortion: int = 0
     substitution_rounds: list[SubstitutionRound] = field(default_factory=list)
+    # Stranded-atom set detected after each pass of the orchestration
+    # loop in parse_spacy_sentence. One entry per pass actually
+    # performed, in order; len(passes) == number of passes.
+    passes: list[list[str]] = field(default_factory=list)
 
 
 def rule_repr(rule: Rule, index: int) -> str:

@@ -266,6 +266,19 @@ def _totals_panel(trace: ParseTrace) -> Panel:
     )
 
 
+def _passes_panel(trace: ParseTrace) -> Panel | None:
+    if not trace.passes:
+        return None
+    table = Table(box=box.SIMPLE, padding=(0, 1), show_header=True)
+    table.add_column("pass", style="cyan", justify="right")
+    table.add_column("stranded atoms", style="white")
+    for idx, strands in enumerate(trace.passes, start=1):
+        atoms_repr = ", ".join(strands) if strands else "(none)"
+        table.add_row(str(idx), atoms_repr)
+    title = f"[bold cyan]Parse passes ({len(trace.passes)})[/bold cyan]"
+    return Panel(table, title=title, border_style="cyan", box=box.ROUNDED)
+
+
 def _post_processing_panel(trace: ParseTrace) -> Panel | None:
     if not trace.post_processing:
         return None
@@ -310,6 +323,10 @@ def _render_report(console: Console, trace: ParseTrace) -> None:
 
     for round_ in trace.substitution_rounds:
         console.print(_substitution_round_panel(round_))
+
+    passes_panel = _passes_panel(trace)
+    if passes_panel is not None:
+        console.print(passes_panel)
 
     post_panel = _post_processing_panel(trace)
     if post_panel is not None:

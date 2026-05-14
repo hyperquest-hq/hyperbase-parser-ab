@@ -299,6 +299,15 @@ class AlphaBetaParser(Parser):
         # atoms. Empty on the first pass; grown across passes by
         # _detect_stranded until it stabilises.
         self._stranded_atoms: set[UniqueAtom] = set()
+        # Pass index at which each stranded atom first entered
+        # self._stranded_atoms. Used to prioritize sliding-window
+        # rescue candidates: when multiple SW candidates tie on
+        # (badness, distortion), the one rescuing the atom stranded
+        # *earliest* wins. The intuition is that older strands are the
+        # ones the orchestration loop has been trying hardest to
+        # rescue, and outranking them with a freshly-stranded atom's
+        # rescue undoes that work.
+        self._strand_pass_idx: dict[UniqueAtom, int] = {}
         # Atoms consumed by the :/J/. iteration-level fallback during the
         # current pass. Captured at the fallback site in _expand_state,
         # reset between passes.
@@ -569,6 +578,7 @@ class AlphaBetaParser(Parser):
             # can rescue those atoms. Stop once the set stabilises or a
             # cap is hit.
             self._stranded_atoms = set()
+            self._strand_pass_idx = {}
             max_passes: int = 4
             for _attempt in range(max_passes):
                 self._force_joined_atoms = set()
@@ -592,8 +602,15 @@ class AlphaBetaParser(Parser):
                     new_stranded = set(self._force_joined_atoms)
                 else:
                     new_stranded = self._detect_stranded(raw_final)
+                if self._cur_trace is not None:
+                    self._cur_trace.passes.append(
+                        sorted(str(ua) for ua in new_stranded)
+                    )
                 if new_stranded <= self._stranded_atoms:
                     break
+                pass_idx: int = _attempt + 1
+                for ua in new_stranded - self._stranded_atoms:
+                    self._strand_pass_idx[ua] = pass_idx
                 self._stranded_atoms |= new_stranded
 
             # Reflect any locked-in substitutions in the per-token traces
@@ -2121,25 +2138,6 @@ class AlphaBetaParser(Parser):
                 return True
         return False
 
-    def _is_relcl_constraint_satisfied(self, new_edge: Hyperedge) -> bool:
-        # If the connector P-atom corresponds to a token with dep_='acl:relcl',
-        # every token-derived atom in new_edge must come from a dep-descendant
-        # of that token (or be the token itself).
-        if new_edge.connector_mtype() != "P":
-            return True
-        pred_atom: Atom | None = new_edge.atom_with_type("P")
-        if pred_atom is None:
-            return True
-        pred_token: Token | None = self.atom2token.get(pred_atom)
-        if pred_token is None or pred_token.dep_ != "acl:relcl":
-            return True
-        allowed_tokens: set[Token] = set(pred_token.subtree)
-        for atom in new_edge.all_atoms():
-            token: Token | None = self.atom2token.get(atom)
-            if token is not None and token not in allowed_tokens:
-                return False
-        return True
-
     def _candidate_badness(self, edge: Hyperedge) -> int:
         total: int = 0
         try:
@@ -2179,6 +2177,18 @@ class AlphaBetaParser(Parser):
         cand_can_dominate: list[bool] = []
         cand_no_dangling: list[bool] = []
         cand_mandatory: list[bool] = []
+        # True iff the candidate was produced by the stranded-atom
+        # sliding-window rescue. Such candidates are immune to
+        # dominance and short-circuit winner selection: if any
+        # survives, the iteration must commit to one of them.
+        cand_sliding_window: list[bool] = []
+        # Priority of the stranded atom this candidate is rescuing —
+        # the pass index at which that atom first entered
+        # self._stranded_atoms. Lower = older = higher priority. Used
+        # to break ties among SW winners so the rescue of the
+        # longest-known stranded atom is preferred over the rescue of
+        # a freshly-stranded one. None for non-SW candidates.
+        cand_sw_priority: list[int | None] = []
 
         # token -> sequence index of the live hyperedge containing that token
         tok2pos: dict[Token, int] = {}
@@ -2210,11 +2220,13 @@ class AlphaBetaParser(Parser):
             rule: Rule,
             indices: tuple[int, ...],
             parent_pos: int,
+            is_sliding_window: bool = False,
+            sw_priority: int | None = None,
         ) -> bool:
             new_edge: Hyperedge | None = apply_rule_indices(
                 rule, state.sequence, list(indices), self.atom2token
             )
-            if not new_edge or not self._is_relcl_constraint_satisfied(new_edge):
+            if not new_edge:
                 return False
             # Assign argroles to the candidate before badness so the
             # P/B argrole-aware checks see realistic connectors, then
@@ -2256,6 +2268,8 @@ class AlphaBetaParser(Parser):
             cand_can_dominate.append(rule.can_dominate)
             cand_no_dangling.append(no_dangling)
             cand_mandatory.append(rule.mandatory)
+            cand_sliding_window.append(is_sliding_window)
+            cand_sw_priority.append(sw_priority)
             return True
 
         # Dep-tree DFS candidate generation. For every live hyperedge H,
@@ -2441,32 +2455,43 @@ class AlphaBetaParser(Parser):
         # force-joined by the iteration-level :/J/. fallback), that atom
         # is recorded in self._stranded_atoms. Here we generate extra
         # candidates for any position whose entity carries one of those
-        # stranded atoms and whose position is otherwise uncovered by
-        # the DPT-driven (or sibling-exception) candidates. For each
-        # such position P we slide a window of size rule.size across P
-        # for every rule whose first_type matches state.sequence[P].mtype();
-        # apply_rule_indices scans pivot positions internally, so any
-        # window where P validly pivots is accepted. With an empty
-        # self._stranded_atoms (the first pass) the whole block is a
-        # no-op.
+        # stranded atoms. The atom is provably stuck, so we want every
+        # alternative composition involving it — coverage by other
+        # candidates is *not* a reason to skip, since those other
+        # candidates are typically the ones whose resolution left the
+        # atom stranded in the first place. For each such position P we
+        # slide a window of size rule.size across P for every rule
+        # where P's mtype is *either* the pivot type (first_type) or
+        # one of the arg types: apply_rule_indices scans pivot
+        # positions internally, so any window where the types fit is
+        # accepted. Allowing P to land in an arg slot is critical —
+        # once a previous SW rescue has already wrapped the stranded
+        # atom into an edge of a different mtype, the only way to keep
+        # composing is to let some neighboring pivot absorb that edge.
+        # With an empty self._stranded_atoms (the first pass) the whole
+        # block is a no-op.
         seq_len: int = len(state.sequence)
         if seq_len >= 2 and self._stranded_atoms:
-            covered: set[int] = set()
-            for _ca in cand_actions:
-                covered.update(_ca[2])
             for pos in range(seq_len):
-                if pos in covered:
+                # Only fire SW for positions that *are themselves* a
+                # bare stranded atom. Once the atom has been wrapped
+                # into a hyperedge (by an earlier SW rescue this pass,
+                # or by an ordinary DPT candidate), the rescue is
+                # finished — re-firing for it would just churn the
+                # same atom through more compositions and starve other
+                # pending strands. Atoms nested inside an edge at this
+                # position aren't bare here, so they correctly fall
+                # through.
+                seq_pos: Hyperedge = state.sequence[pos]
+                if not seq_pos.atom:
                     continue
-                pos_orig_atoms: set[UniqueAtom] = set()
-                for a in state.sequence[pos].all_atoms():
-                    ua = self.orig_atom.get(a)
-                    if ua is not None:
-                        pos_orig_atoms.add(ua)
-                if not (pos_orig_atoms & self._stranded_atoms):
+                pos_ua: UniqueAtom | None = self.orig_atom.get(cast(Atom, seq_pos))
+                if pos_ua is None or pos_ua not in self._stranded_atoms:
                     continue
+                pos_sw_priority: int = self._strand_pass_idx.get(pos_ua, 1_000_000)
                 pos_mtype: str = state.sequence[pos].mtype()
                 for rule_number, rule in enumerate(RULES):
-                    if rule.first_type != pos_mtype:
+                    if rule.first_type != pos_mtype and pos_mtype not in rule.arg_types:
                         continue
                     size: int = rule.size
                     if size > seq_len:
@@ -2477,7 +2502,31 @@ class AlphaBetaParser(Parser):
                         if ws < 0 or we >= seq_len:
                             continue
                         indices = tuple(range(ws, we + 1))
-                        _try_candidate(rule_number, rule, indices, pos)
+                        # parent_pos is the window position that will
+                        # serve as the rule's pivot — the first index
+                        # whose mtype matches the rule's first_type,
+                        # mirroring apply_rule_indices' own pivot scan.
+                        # If pos itself is the pivot, parent_pos == pos
+                        # (original behavior); if pos is an arg, the
+                        # pivot is some neighbor in the window.
+                        parent_pos: int | None = next(
+                            (
+                                i
+                                for i in indices
+                                if state.sequence[i].mtype() == rule.first_type
+                            ),
+                            None,
+                        )
+                        if parent_pos is None:
+                            continue
+                        _try_candidate(
+                            rule_number,
+                            rule,
+                            indices,
+                            parent_pos,
+                            is_sliding_window=True,
+                            sw_priority=pos_sw_priority,
+                        )
 
         # Drop A if there exists B != A with A's signature a strict subset
         # of B's AND A and B share the same no_dangling status. Only
@@ -2536,6 +2585,12 @@ class AlphaBetaParser(Parser):
 
         keep: list[bool] = [True] * n
         for i in range(n):
+            # Sliding-window rescue candidates are immune to dominance:
+            # they exist precisely because the regular candidate set on
+            # the previous pass left a stranded atom, so we must not
+            # let the same regular candidates suppress them here.
+            if cand_sliding_window[i]:
+                continue
             for j in range(n):
                 if i == j or not cand_can_dominate[j]:
                     continue
@@ -2569,18 +2624,30 @@ class AlphaBetaParser(Parser):
         cand_actions = [cand_actions[i] for i in range(n) if keep[i]]
         base_iter.candidates = [cand_records[i] for i in range(n) if keep[i]]
         cand_mandatory = [cand_mandatory[i] for i in range(n) if keep[i]]
+        cand_sliding_window = [cand_sliding_window[i] for i in range(n) if keep[i]]
+        cand_sw_priority = [cand_sw_priority[i] for i in range(n) if keep[i]]
 
         if not cand_actions:
             base_iter.fallback_used = True
             if len(state.sequence) > 0:
-                # Record the atoms consumed by this force-join so the
-                # outer parse-orchestration loop can mark them stranded
-                # and re-run with the sliding-window fallback enabled.
+                # Record stranded atoms — connector-capable atoms that
+                # never satisfied any rule at their position. A sequence
+                # element that's *itself* a bare atom at the moment the
+                # :/J/. fallback fires means no rule ever absorbed it
+                # (not as pivot, not as arg); if the rest of the
+                # sequence had been able to consume it, it would have
+                # been wrapped into some edge already. Non-atom
+                # sequence elements contribute nothing — every atom
+                # nested inside them was absorbed by some earlier rule.
+                pivot_capable: set[str] = {r.first_type for r in RULES}
                 for fj_edge in state.sequence[:2]:
-                    for fj_atom in fj_edge.all_atoms():
-                        fj_ua = self.orig_atom.get(fj_atom)
-                        if fj_ua is not None:
-                            self._force_joined_atoms.add(fj_ua)
+                    if not fj_edge.atom:
+                        continue
+                    if fj_edge.mtype() not in pivot_capable:
+                        continue
+                    fj_ua = self.orig_atom.get(cast(Atom, fj_edge))
+                    if fj_ua is not None:
+                        self._force_joined_atoms.add(fj_ua)
                 fallback: Hyperedge = hedge([":/J/.", *state.sequence[:2]])
                 new_sequence: list[Hyperedge] = (
                     [fallback] if fallback else []
@@ -2601,10 +2668,35 @@ class AlphaBetaParser(Parser):
         # (badness ASC, distortion ASC, score DESC). A mandatory rule
         # that ranks first short-circuits the same way every other
         # candidate would have — there's only one survivor either way.
+        # If any sliding-window rescue candidates survived, the winner
+        # must come from that subset: their whole purpose is to break
+        # the previous pass's stranding, so committing to one is the
+        # mechanism by which the rescue takes effect. Among SW winners
+        # the rescue priority comes first: earlier-stranded atoms
+        # (lower pass index) outrank later-stranded ones, so the
+        # rescue commits to the longest-known strand before serving a
+        # fresher one. Only after priority+badness+distortion ties
+        # does score break the remaining ambiguity.
         indexed: list[
             tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int, int]]
         ] = list(enumerate(cand_actions))
-        indexed.sort(key=lambda ic: (ic[1][3], ic[1][4], -ic[1][0]))
+        if any(cand_sliding_window):
+            indexed = [ic for ic in indexed if cand_sliding_window[ic[0]]]
+
+            def _sw_sort_key(
+                ic: tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int, int]],
+            ) -> tuple[int, int, int, int]:
+                prio: int | None = cand_sw_priority[ic[0]]
+                return (
+                    prio if prio is not None else 1_000_000,
+                    ic[1][3],
+                    ic[1][4],
+                    -ic[1][0],
+                )
+
+            indexed.sort(key=_sw_sort_key)
+        else:
+            indexed.sort(key=lambda ic: (ic[1][3], ic[1][4], -ic[1][0]))
         cand_idx, (score, new_edge, indices, bad, distortion, parent_pos) = indexed[0]
         iter_for_child: RuleIteration = RuleIteration(
             iteration=base_iter.iteration,
