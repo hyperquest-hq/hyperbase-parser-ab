@@ -298,7 +298,7 @@ class TestParserFlattenConjunctions:
         assert parser._flatten_conjunctions(edge) == expected
 
 
-class TestParserBeamSearch:
+class TestParserReduction:
     @staticmethod
     def _setup_loop_state(parser):
         parser.depths = {}
@@ -330,92 +330,26 @@ class TestParserBeamSearch:
             parser.atom2token[atom] = tok
         return tokens
 
-    def test_default_beam_width(self):
-        parser = _make_parser()
-        assert parser.beam_width == 1
-
-    def test_beam_width_param_is_read(self):
-        with (
-            patch(
-                "hyperbase_parser_ab.parser.SPACY_MODELS", {"en": ["en_core_web_sm"]}
-            ),
-            patch("spacy.util.is_package", return_value=True),
-            patch("spacy.load", return_value=MagicMock()),
-            patch("hyperbase_parser_ab.parser.Alpha"),
-        ):
-            parser = AlphaBetaParser({"language": "en", "beam_width": 5})
-        assert parser.beam_width == 5
-
-    def test_beam_width_clamps_to_one_minimum(self):
-        with (
-            patch(
-                "hyperbase_parser_ab.parser.SPACY_MODELS", {"en": ["en_core_web_sm"]}
-            ),
-            patch("spacy.util.is_package", return_value=True),
-            patch("spacy.load", return_value=MagicMock()),
-            patch("hyperbase_parser_ab.parser.Alpha"),
-        ):
-            parser = AlphaBetaParser({"language": "en", "beam_width": 0})
-        assert parser.beam_width == 1
-
     def test_greedy_reduces_two_concepts(self):
         parser = _make_parser()
-        parser.beam_width = 1
         self._setup_loop_state(parser)
         atom_a = hedge("cat/Cc/en")
         atom_b = hedge("dog/Cc/en")
         assert atom_a is not None
         assert atom_b is not None
         self._wire_dep_chain(parser, [atom_a, atom_b])
-        best_beam, _substituted, _rounds = parser._hill_climb_atomization(
+        best_state, _substituted, _rounds = parser._hill_climb_atomization(
             [atom_a, atom_b], []
         )
-        assert best_beam is not None
-        result = best_beam.sequence
-        failed = best_beam.failed
+        assert best_state is not None
+        result = best_state.sequence
+        failed = best_state.failed
         assert result is not None
         assert len(result) == 1
         assert failed is False
         # Rule("C", {"C"}, 2, "+/B/.") fires, building the +/B builder
         # (argroles are assigned in-loop, so the builder carries them already)
         assert str(result[0]).startswith("(+/B.")
-
-    def test_beam_width_three_reduces_two_concepts(self):
-        parser = _make_parser()
-        parser.beam_width = 3
-        self._setup_loop_state(parser)
-        atom_a = hedge("cat/Cc/en")
-        atom_b = hedge("dog/Cc/en")
-        assert atom_a is not None
-        assert atom_b is not None
-        self._wire_dep_chain(parser, [atom_a, atom_b])
-        best_beam, _substituted, _rounds = parser._hill_climb_atomization(
-            [atom_a, atom_b], []
-        )
-        assert best_beam is not None
-        result = best_beam.sequence
-        failed = best_beam.failed
-        assert result is not None
-        assert len(result) == 1
-        assert failed is False
-
-    def test_beam_returns_lowest_total_badness(self):
-        """With width=2 the search should keep the clean path alive even when
-        the locally-best candidate is only marginally better."""
-        parser = _make_parser()
-        parser.beam_width = 2
-        self._setup_loop_state(parser)
-        # Three concepts: must reduce two pairs in sequence. Several beam
-        # paths exist; the clean-path winner should have total_badness == 0
-        # because every C+C → +/B is structurally clean.
-        atoms = [hedge("a/Cc/en"), hedge("b/Cc/en"), hedge("c/Cc/en")]
-        for a in atoms:
-            assert a is not None
-        best_beam, _substituted, _rounds = parser._hill_climb_atomization(atoms, [])
-        assert best_beam is not None
-        result = best_beam.sequence
-        assert result is not None
-        assert len(result) == 1
 
 
 class TestParserCandidateBadness:
@@ -432,7 +366,7 @@ class TestParserCandidateBadness:
         assert parser._candidate_badness(edge) == 0
 
     def test_no_argroles_now_counts(self):
-        """Argroles are assigned to candidates inside _expand_beam, so by
+        """Argroles are assigned to candidates inside _expand_state, so by
         the time _candidate_badness runs the connector should already carry
         argroles. A connector that still lacks them is genuinely malformed
         and 'no-argroles' (sev 0, weight 1000) should contribute."""

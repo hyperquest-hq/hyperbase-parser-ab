@@ -1,9 +1,6 @@
 import itertools
-import math
 import multiprocessing as mp
 import re
-import sys
-import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -96,7 +93,7 @@ _BADNESS_CRASH_PENALTY: int = 1_000_000
 
 
 @dataclass
-class _Beam:
+class _ParseState:
     sequence: list[Hyperedge]
     total_badness: int
     total_score: int
@@ -184,44 +181,6 @@ class AlphaBetaParser(Parser):
                 "required": False,
                 "is_path": True,
             },
-            "beam_width": {
-                "type": int,
-                "default": 1,
-                "description": (
-                    "Beam search width for the reduction loop. 1 (default) "
-                    "is greedy. Higher values keep multiple parse hypotheses "
-                    "alive in parallel and pick the lowest-total-badness "
-                    "one at the end (tie-broken by total score)."
-                ),
-                "required": False,
-                "reload": False,
-            },
-            "exact_search": {
-                "type": bool,
-                "default": False,
-                "description": (
-                    "If True, run an exhaustive branch-and-bound search "
-                    "instead of beam search. Guarantees finding the "
-                    "(badness, distortion)-optimal parse but disregards "
-                    "beam_width and is worst-case exponential. In practice "
-                    "fast when low-badness parses are easy to find."
-                ),
-                "required": False,
-                "reload": False,
-            },
-            "exact_search_timeout": {
-                "type": float,
-                "default": 10.0,
-                "description": (
-                    "Per-atomization wall-clock budget (seconds) for exact "
-                    "search. When exceeded, returns the best completed "
-                    "beam found so far for that atomization, or falls back "
-                    "to beam search if none completed. 0 disables the "
-                    "timeout. Only used when exact_search=True."
-                ),
-                "required": False,
-                "reload": False,
-            },
             "n_workers": {
                 "type": int,
                 "default": 1,
@@ -246,8 +205,8 @@ class AlphaBetaParser(Parser):
                     "(e.g. Cd/Cx) are considered fixed at top-1. Eligible "
                     "tokens are ranked ascending by top-1 probability and "
                     "the bottom `int(ratio * len(eligible))` get the "
-                    "runner-up label as a viable alternative in beam-search "
-                    "seed sequences. 0 disables alternatives; 1 considers "
+                    "runner-up label as a viable alternative in seed "
+                    "sequences. 0 disables alternatives; 1 considers "
                     "every eligible token uncertain."
                 ),
                 "required": False,
@@ -258,10 +217,9 @@ class AlphaBetaParser(Parser):
                 "default": True,
                 "description": (
                     "If True (default), apply the post-search transforms "
-                    "(_apply_arg_roles, _deepen_modifiers) to the winning "
-                    "beam's edge before returning. If False, return the raw "
-                    "beam-search edge unchanged. Useful for debugging the "
-                    "search output."
+                    "(_apply_arg_roles, _deepen_modifiers) to the reduced "
+                    "edge before returning. If False, return the raw edge "
+                    "unchanged. Useful for debugging the search output."
                 ),
                 "required": False,
                 "reload": False,
@@ -269,9 +227,7 @@ class AlphaBetaParser(Parser):
         }
 
     def apply_live_setting(self, name: str, value: Any) -> None:  # noqa: ANN401
-        if name == "beam_width":
-            value = max(1, int(value))
-        elif name == "uncertain_atom_ratio":
+        if name == "uncertain_atom_ratio":
             value = min(1.0, max(0.0, float(value)))
         super().apply_live_setting(name, value)
 
@@ -288,11 +244,6 @@ class AlphaBetaParser(Parser):
         self.atom_lang: str = self.lang if lang_namespace else ""
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
-        self.beam_width: int = max(1, int(self.params.get("beam_width", 1)))
-        self.exact_search: bool = bool(self.params.get("exact_search", False))
-        self.exact_search_timeout: float = float(
-            self.params.get("exact_search_timeout", 10.0)
-        )
         self.n_workers: int = max(1, int(self.params.get("n_workers", 1)))
         self.uncertain_atom_ratio: float = min(
             1.0, max(0.0, float(self.params.get("uncertain_atom_ratio", 0)))
@@ -335,13 +286,13 @@ class AlphaBetaParser(Parser):
         # Atoms found to be "stranded" — i.e. left bare at the top of the
         # final hyperedge or force-joined via the :/J/. iteration-level
         # fallback — at a previous pass of the current parse. Drives the
-        # sliding-window per-position fallback inside _expand_beam: that
+        # sliding-window per-position fallback inside _expand_state: that
         # block fires only for positions whose entity carries one of these
         # atoms. Empty on the first pass; grown across passes by
         # _detect_stranded until it stabilises.
         self._stranded_atoms: set[UniqueAtom] = set()
         # Atoms consumed by the :/J/. iteration-level fallback during the
-        # current pass. Captured at the fallback site in _expand_beam,
+        # current pass. Captured at the fallback site in _expand_state,
         # reset between passes.
         self._force_joined_atoms: set[UniqueAtom] = set()
         # Most recently parsed sub-sentence text, captured for the
@@ -361,7 +312,7 @@ class AlphaBetaParser(Parser):
 
         self._repl_session: Any = None
         self._cur_trace: ParseTrace | None = None
-        self._cur_beam_sequence: list[Hyperedge] | None = None
+        self._cur_sequence: list[Hyperedge] | None = None
 
     def debug_msg(self, msg: str) -> None:
         if self.debug:
@@ -370,12 +321,6 @@ class AlphaBetaParser(Parser):
     def _report_enabled(self) -> bool:
         sess: Any = self._repl_session
         return bool(sess and sess.settings.get("report", False))
-
-    def _exact_search_enabled(self) -> bool:
-        sess: Any = self._repl_session
-        if sess is not None:
-            return bool(sess.settings.get("exact_search", self.exact_search))
-        return self.exact_search
 
     def _post_processing_enabled(self) -> bool:
         sess: Any = self._repl_session
@@ -394,7 +339,7 @@ class AlphaBetaParser(Parser):
         # in the just-completed pass: atoms at depth 1 of `final_edge`
         # whose mtype is pivot-capable (so the failure is a real one, not
         # a legitimate punctuation leaf) plus atoms that the
-        # iteration-level :/J/. fallback in _expand_beam force-joined
+        # iteration-level :/J/. fallback in _expand_state force-joined
         # during the pass (captured into self._force_joined_atoms).
         pivot_capable: set[str] = {r.first_type for r in RULES}
         stranded: set[UniqueAtom] = set()
@@ -434,7 +379,7 @@ class AlphaBetaParser(Parser):
     ) -> list[ParseResult]:
         """Parse `sentence` but force the atomizer label at each `tok_idx`
         to the corresponding `alt_label` in `forced_subs`. Hill-climbing
-        is skipped — exactly one beam search runs per sub-sentence with
+        is skipped — exactly one reduction runs per sub-sentence with
         the patched seed. Used by the REPL `/sub <N>` command to replay
         a recorded substitution trial. The replay does not update
         `self._last_sub_climb`, so subsequent `/sub` calls still refer
@@ -464,7 +409,7 @@ class AlphaBetaParser(Parser):
 
         spaCy runs as a single ``nlp.pipe`` over the whole batch, the
         atomizer runs as a single padded forward pass, and the
-        per-sentence beam search is then optionally sharded across
+        per-sentence reduction is then optionally sharded across
         ``n_workers`` processes. Falls back to the base-class
         sentence-by-sentence loop if input is empty."""
         if not sentences:
@@ -603,12 +548,12 @@ class AlphaBetaParser(Parser):
                 )
 
             edge: Hyperedge | None = None
-            best_beam: _Beam | None = None
+            best_state: _ParseState | None = None
             substituted: set[int] = set()
             sub_rounds: list[SubstitutionRound] = []
             # Two-pass orchestration. First attempt runs vanilla (empty
             # _stranded_atoms keeps the sliding-window block in
-            # _expand_beam a no-op). After each attempt we look at the
+            # _expand_state a no-op). After each attempt we look at the
             # raw final edge plus any atoms force-joined by the :/J/.
             # fallback and add them to _stranded_atoms. If the stranded
             # set grew, re-run the search so the sliding-window block
@@ -619,21 +564,21 @@ class AlphaBetaParser(Parser):
             for _attempt in range(max_passes):
                 self._force_joined_atoms = set()
                 if forced_substitutions is not None:
-                    best_beam = self._run_beam_search_one_or_exact(seed_seq)
+                    best_state = self._reduce_sequence(seed_seq)
                     substituted = set(forced_substitutions.keys())
                     sub_rounds = []
                 else:
-                    best_beam, substituted, sub_rounds = self._hill_climb_atomization(
+                    best_state, substituted, sub_rounds = self._hill_climb_atomization(
                         seed_seq, alts, atom_traces=atom_traces
                     )
                 if (
-                    best_beam is None
-                    or best_beam.failed
-                    or len(best_beam.sequence) != 1
+                    best_state is None
+                    or best_state.failed
+                    or len(best_state.sequence) != 1
                 ):
                     raw_final = None
                 else:
-                    raw_final = non_unique(best_beam.sequence[0])
+                    raw_final = non_unique(best_state.sequence[0])
                 if raw_final is None:
                     new_stranded = set(self._force_joined_atoms)
                 else:
@@ -665,13 +610,13 @@ class AlphaBetaParser(Parser):
                 self._cur_trace.atoms.extend(atom_traces)
 
             result: list[Hyperedge] | None = (
-                best_beam.sequence if best_beam is not None else None
+                best_state.sequence if best_state is not None else None
             )
-            failed: bool = best_beam.failed if best_beam is not None else True
-            if best_beam is not None and self._cur_trace is not None:
-                self._cur_trace.iterations.extend(best_beam.iterations)
-                self._cur_trace.total_badness = best_beam.total_badness
-                self._cur_trace.total_distortion = best_beam.total_distortion
+            failed: bool = best_state.failed if best_state is not None else True
+            if best_state is not None and self._cur_trace is not None:
+                self._cur_trace.iterations.extend(best_state.iterations)
+                self._cur_trace.total_badness = best_state.total_badness
+                self._cur_trace.total_distortion = best_state.total_distortion
                 self._cur_trace.substitution_rounds.extend(sub_rounds)
 
             # Cache the trial-number -> substitutions map so the REPL
@@ -718,7 +663,7 @@ class AlphaBetaParser(Parser):
                             ("deepen_modifiers", str(edge))
                         )
                 else:
-                    self.debug_msg("Post-processing disabled — keeping raw beam edge.")
+                    self.debug_msg("Post-processing disabled — keeping raw edge.")
                     if self._cur_trace is not None:
                         self._cur_trace.post_processing.append(
                             ("post_processing_disabled", str(edge))
@@ -1014,7 +959,7 @@ class AlphaBetaParser(Parser):
             self.atom2token[unew_pred] = self.atom2token[upred]
             # Walk to the canonical so repeated argrole rewrites (this
             # function recurses into sub-edges, and edges built in
-            # earlier beam iterations may already be argroled) don't
+            # earlier reduction iterations may already be argroled) don't
             # leave a multi-step chain in orig_atom — every key must
             # map directly to the seed canonical, or the lock-in scan
             # in _distortion_delta will silently miss every DPT pair
@@ -1656,8 +1601,7 @@ class AlphaBetaParser(Parser):
         # SH edge directly between its atoms — outer constructions only
         # connect the surviving heads, not buried atoms. Charging at
         # lock-in is therefore final, and the cumulative total is
-        # monotone non-decreasing (which keeps _exact_search's
-        # branch-and-bound prune admissible).
+        # monotone non-decreasing.
         if new_edge.atom:
             return 0
         children: list[Hyperedge] = list(new_edge)
@@ -1867,13 +1811,13 @@ class AlphaBetaParser(Parser):
         # A "dangling root" x is a sentence token outside the candidate
         # window whose dep-parent is inside it. The candidate is acceptable
         # iff every such x can be absorbed by *some* rule whose inputs
-        # include both the new candidate edge and the live beam.sequence
+        # include both the new candidate edge and the live current sequence
         # edge at x's position, and whose application produces an output
         # edge with both _candidate_badness == 0 and _distortion_delta == 0.
         # Extra slots, if the rule has size > 2, may be filled from any
         # other live edge in the post-application sequence.
-        beam_seq: list[Hyperedge] | None = self._cur_beam_sequence
-        if beam_seq is None:
+        cur_seq: list[Hyperedge] | None = self._cur_sequence
+        if cur_seq is None:
             return True
 
         cand_tokens: set[Token] = set()
@@ -1886,14 +1830,14 @@ class AlphaBetaParser(Parser):
             return True
 
         tok2pos: dict[Token, int] = {}
-        for pos, edge in enumerate(beam_seq):
+        for pos, edge in enumerate(cur_seq):
             for atom in edge.all_atoms():
                 tok = self.atom2token.get(atom)
                 if tok is not None:
                     tok2pos[tok] = pos
 
         cand_positions: set[int] = {
-            pos for pos, edge in enumerate(beam_seq) if any(edge is w for w in window)
+            pos for pos, edge in enumerate(cur_seq) if any(edge is w for w in window)
         }
 
         # Post-application "virtual" sequence: drop every window position,
@@ -1901,7 +1845,7 @@ class AlphaBetaParser(Parser):
         virtual: list[Hyperedge] = []
         new_edge_v: int = -1
         orig_to_virtual: dict[int, int] = {}
-        for pos, edge in enumerate(beam_seq):
+        for pos, edge in enumerate(cur_seq):
             if pos == parent_pos:
                 new_edge_v = len(virtual)
                 orig_to_virtual[pos] = new_edge_v
@@ -2014,24 +1958,25 @@ class AlphaBetaParser(Parser):
             return _BADNESS_CRASH_PENALTY
         return total
 
-    def _expand_beam(
-        self,
-        beam: _Beam,
-        prune: bool = True,
-        best_so_far: tuple[float, float] = (math.inf, math.inf),
-    ) -> list[_Beam]:
-        self._cur_beam_sequence = beam.sequence
+    def _expand_state(self, state: _ParseState) -> _ParseState | None:
+        # Generate every rule application that can fire on `state.sequence`,
+        # run the dominance filter, and return the single best successor
+        # state by (badness ASC, distortion ASC, score DESC). When no
+        # rule applies, a `:/J/.` force-join fallback is produced with
+        # `failed=True` so the caller's reduction loop still terminates.
+        # Returns None only on an unrecoverable internal error.
+        self._cur_sequence = state.sequence
         base_iter: RuleIteration = RuleIteration(
-            iteration=len(beam.iterations),
-            sequence_repr=[str(e) for e in beam.sequence],
+            iteration=len(state.iterations),
+            sequence_repr=[str(e) for e in state.sequence],
         )
         # Parallel lists kept in lockstep until the dominance filter.
         # Per-candidate tuple:
         # (score, new_edge, indices, badness, distortion, parent_pos)
-        # `indices` holds the positions in beam.sequence consumed by the
+        # `indices` holds the positions in state.sequence consumed by the
         # rule, sorted ascending by sentence position. `parent_pos` is the
         # position of the dep-tree-shallowest hyperedge among indices — the
-        # new edge replaces beam.sequence[parent_pos] and the other
+        # new edge replaces state.sequence[parent_pos] and the other
         # positions are dropped.
         cand_actions: list[tuple[int, Hyperedge, tuple[int, ...], int, int, int]] = []
         cand_records: list[RuleCandidate] = []
@@ -2042,7 +1987,7 @@ class AlphaBetaParser(Parser):
 
         # token -> sequence index of the live hyperedge containing that token
         tok2pos: dict[Token, int] = {}
-        for pos, edge in enumerate(beam.sequence):
+        for pos, edge in enumerate(state.sequence):
             for atom in edge.all_atoms():
                 tok = self.atom2token.get(atom)
                 if tok is not None:
@@ -2050,12 +1995,12 @@ class AlphaBetaParser(Parser):
 
         def _live_dep_children(pos: int) -> set[int]:
             # Live child-hyperedge positions: every dep-child of any token
-            # inside beam.sequence[pos] that currently lives in a *different*
+            # inside state.sequence[pos] that currently lives in a *different*
             # sequence position.
             out: set[int] = set()
             edge_tokens: set[Token] = {
                 self.atom2token[a]
-                for a in beam.sequence[pos].all_atoms()
+                for a in state.sequence[pos].all_atoms()
                 if a in self.atom2token
             }
             for t in edge_tokens:
@@ -2072,7 +2017,7 @@ class AlphaBetaParser(Parser):
             parent_pos: int,
         ) -> bool:
             new_edge: Hyperedge | None = apply_rule_indices(
-                rule, beam.sequence, list(indices), self.atom2token
+                rule, state.sequence, list(indices), self.atom2token
             )
             if not new_edge or not self._is_relcl_constraint_satisfied(new_edge):
                 return False
@@ -2080,18 +2025,18 @@ class AlphaBetaParser(Parser):
             # P/B argrole-aware checks see realistic connectors, then
             # resolve the '?' placeholders _apply_arg_roles leaves
             # behind on relations whose dep-tag didn't map to a
-            # role. The argroled edge propagates into beam.sequence,
+            # role. The argroled edge propagates into state.sequence,
             # so later rule applications nest already-argroled
             # subedges (and the post-loop pass becomes idempotent).
             # Both helpers index self.atom2token by the bare Atom
             # identity stashed at parse_token time, so we have to
-            # non_unique → apply → unique to keep beam.sequence
-            # uniformly UniqueAtom-wrapped (the rest of _expand_beam
+            # non_unique → apply → unique to keep state.sequence
+            # uniformly UniqueAtom-wrapped (the rest of _expand_state
             # depends on that wrapping for orig_atom lookups).
             new_edge = unique(
                 self._fix_argroles(self._apply_arg_roles(non_unique(new_edge)))
             )
-            window: list[Hyperedge] = [beam.sequence[k] for k in indices]
+            window: list[Hyperedge] = [state.sequence[k] for k in indices]
             base_score, no_dangling = self._score(window, new_edge, parent_pos)
             score: int = base_score + self._plus_builder_bonus(new_edge)
             bad: int = self._candidate_badness(new_edge)
@@ -2128,20 +2073,20 @@ class AlphaBetaParser(Parser):
         max_rule_size: int = max(r.size for r in RULES)
 
         children_of: dict[int, list[int]] = {
-            pos: sorted(_live_dep_children(pos)) for pos in range(len(beam.sequence))
+            pos: sorted(_live_dep_children(pos)) for pos in range(len(state.sequence))
         }
 
         # Per-position DPT-parent coverage. A position "covers" a DPT
         # parent atom P if any atom inside it is a direct dep-child of P.
         # dpt_sibling_positions[P] is the sorted list of all positions
         # that cover P — these are the DPT-siblings under P as seen from
-        # beam.sequence. Both dicts feed the sibling-gap distortion charge
+        # state.sequence. Both dicts feed the sibling-gap distortion charge
         # applied per candidate in _sibling_gap_distortion below.
         dpt_parents_at_pos: dict[int, set[UniqueAtom]] = {}
         dpt_sibling_positions: dict[UniqueAtom, list[int]] = {}
-        for pos in range(len(beam.sequence)):
+        for pos in range(len(state.sequence)):
             parents_here: set[UniqueAtom] = set()
-            for a in beam.sequence[pos].all_atoms():
+            for a in state.sequence[pos].all_atoms():
                 ua = self.orig_atom.get(a)
                 if ua is None:
                     continue
@@ -2155,7 +2100,7 @@ class AlphaBetaParser(Parser):
         def _sibling_gap_distortion(indices: tuple[int, ...]) -> int:
             # +1 per non-selected interleaving DPT-sibling. For each DPT
             # parent that has >= 2 selected positions, sort the selected
-            # positions by beam.sequence index and count, between each
+            # positions by state.sequence index and count, between each
             # successive selected pair, how many positions that *also*
             # cover the same parent fall strictly between them and aren't
             # themselves selected.
@@ -2208,7 +2153,7 @@ class AlphaBetaParser(Parser):
                     base.append(frozenset({node}) | pos_extra)
             return base
 
-        for parent_pos in range(len(beam.sequence)):
+        for parent_pos in range(len(state.sequence)):
             by_size: dict[int, list[frozenset[int]]] = {}
             for st in _subtrees_rooted_at(parent_pos, max_rule_size):
                 if len(st) >= 2:
@@ -2234,7 +2179,7 @@ class AlphaBetaParser(Parser):
         for rule_number, rule in enumerate(RULES):
             if not rule.consecutive_siblings_ok or rule.size != 2:
                 continue
-            for p in range(len(beam.sequence) - 1):
+            for p in range(len(state.sequence) - 1):
                 pa, pb = p, p + 1
                 if not (parents_of_pos.get(pa, set()) & parents_of_pos.get(pb, set())):
                     continue
@@ -2249,12 +2194,12 @@ class AlphaBetaParser(Parser):
         # stranded atoms and whose position is otherwise uncovered by
         # the DPT-driven (or sibling-exception) candidates. For each
         # such position P we slide a window of size rule.size across P
-        # for every rule whose first_type matches beam.sequence[P].mtype();
+        # for every rule whose first_type matches state.sequence[P].mtype();
         # apply_rule_indices scans pivot positions internally, so any
         # window where P validly pivots is accepted. With an empty
         # self._stranded_atoms (the first pass) the whole block is a
         # no-op.
-        seq_len: int = len(beam.sequence)
+        seq_len: int = len(state.sequence)
         if seq_len >= 2 and self._stranded_atoms:
             covered: set[int] = set()
             for _ca in cand_actions:
@@ -2263,13 +2208,13 @@ class AlphaBetaParser(Parser):
                 if pos in covered:
                     continue
                 pos_orig_atoms: set[UniqueAtom] = set()
-                for a in beam.sequence[pos].all_atoms():
+                for a in state.sequence[pos].all_atoms():
                     ua = self.orig_atom.get(a)
                     if ua is not None:
                         pos_orig_atoms.add(ua)
                 if not (pos_orig_atoms & self._stranded_atoms):
                     continue
-                pos_mtype: str = beam.sequence[pos].mtype()
+                pos_mtype: str = state.sequence[pos].mtype()
                 for rule_number, rule in enumerate(RULES):
                     if rule.first_type != pos_mtype:
                         continue
@@ -2377,227 +2322,105 @@ class AlphaBetaParser(Parser):
 
         if not cand_actions:
             base_iter.fallback_used = True
-            if len(beam.sequence) > 0:
+            if len(state.sequence) > 0:
                 # Record the atoms consumed by this force-join so the
                 # outer parse-orchestration loop can mark them stranded
                 # and re-run with the sliding-window fallback enabled.
-                for fj_edge in beam.sequence[:2]:
+                for fj_edge in state.sequence[:2]:
                     for fj_atom in fj_edge.all_atoms():
                         fj_ua = self.orig_atom.get(fj_atom)
                         if fj_ua is not None:
                             self._force_joined_atoms.add(fj_ua)
-                fallback: Hyperedge = hedge([":/J/.", *beam.sequence[:2]])
+                fallback: Hyperedge = hedge([":/J/.", *state.sequence[:2]])
                 new_sequence: list[Hyperedge] = (
                     [fallback] if fallback else []
-                ) + beam.sequence[2:]
+                ) + state.sequence[2:]
             else:
                 new_sequence = []
-            return [
-                _Beam(
-                    sequence=new_sequence,
-                    total_badness=beam.total_badness + _BADNESS_CRASH_PENALTY,
-                    total_score=beam.total_score,
-                    total_distortion=beam.total_distortion,
-                    iterations=[*beam.iterations, base_iter],
-                    failed=True,
-                    seq_index=beam.seq_index,
-                )
-            ]
+            return _ParseState(
+                sequence=new_sequence,
+                total_badness=state.total_badness + _BADNESS_CRASH_PENALTY,
+                total_score=state.total_score,
+                total_distortion=state.total_distortion,
+                iterations=[*state.iterations, base_iter],
+                failed=True,
+                seq_index=state.seq_index,
+            )
 
+        # Pick the single first-place candidate by
+        # (badness ASC, distortion ASC, score DESC). A mandatory rule
+        # that ranks first short-circuits the same way every other
+        # candidate would have — there's only one survivor either way.
         indexed: list[
             tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int, int]]
         ] = list(enumerate(cand_actions))
-        # Sort by (badness ASC, distortion ASC, score DESC) to determine
-        # first place. A mandatory rule that ranks first short-circuits
-        # both pruning modes: only that single candidate survives, every
-        # alternative is dropped.
         indexed.sort(key=lambda ic: (ic[1][3], ic[1][4], -ic[1][0]))
-        if indexed and cand_mandatory[indexed[0][0]]:
-            top = [indexed[0]]
-        elif prune:
-            # Pick top-k actions from this beam by
-            # (badness ASC, distortion ASC, score DESC) so one beam
-            # can't fan out beyond beam_width children.
-            top = indexed[: self.beam_width]
-        else:
-            # Branch-and-bound: keep every candidate whose extension cost
-            # is not already strictly worse than best_so_far. Cumulative
-            # badness and distortion are monotone non-decreasing, so this
-            # prune is admissible.
-            top = [
-                ia
-                for ia in indexed
-                if (
-                    beam.total_badness + ia[1][3],
-                    beam.total_distortion + ia[1][4],
+        cand_idx, (score, new_edge, indices, bad, distortion, parent_pos) = indexed[0]
+        iter_for_child: RuleIteration = RuleIteration(
+            iteration=base_iter.iteration,
+            sequence_repr=base_iter.sequence_repr,
+            candidates=[
+                RuleCandidate(
+                    rule_index=c.rule_index,
+                    rule_repr=c.rule_repr,
+                    pos=c.pos,
+                    score=c.score,
+                    new_edge_repr=c.new_edge_repr,
+                    badness=c.badness,
+                    distortion=c.distortion,
+                    is_winner=(i == cand_idx),
+                    indices=list(c.indices) if c.indices is not None else None,
                 )
-                <= best_so_far
-            ]
-
-        extensions: list[_Beam] = []
-        for cand_idx, (
-            score,
-            new_edge,
-            indices,
-            bad,
-            distortion,
-            parent_pos,
-        ) in top:
-            iter_for_child: RuleIteration = RuleIteration(
-                iteration=base_iter.iteration,
-                sequence_repr=base_iter.sequence_repr,
-                candidates=[
-                    RuleCandidate(
-                        rule_index=c.rule_index,
-                        rule_repr=c.rule_repr,
-                        pos=c.pos,
-                        score=c.score,
-                        new_edge_repr=c.new_edge_repr,
-                        badness=c.badness,
-                        distortion=c.distortion,
-                        is_winner=(i == cand_idx),
-                        indices=list(c.indices) if c.indices is not None else None,
-                    )
-                    for i, c in enumerate(base_iter.candidates)
-                ],
-                dominated=list(base_iter.dominated),
-                fallback_used=False,
-            )
-            drop: set[int] = set(indices) - {parent_pos}
-            new_sequence = [
-                new_edge if k == parent_pos else e
-                for k, e in enumerate(beam.sequence)
-                if k not in drop
-            ]
-            extensions.append(
-                _Beam(
-                    sequence=new_sequence,
-                    total_badness=beam.total_badness + bad,
-                    total_score=beam.total_score + score,
-                    total_distortion=beam.total_distortion + distortion,
-                    iterations=[*beam.iterations, iter_for_child],
-                    failed=beam.failed,
-                    seq_index=beam.seq_index,
-                )
-            )
-        return extensions
-
-    def _exact_search(
-        self, beams: list[_Beam], deadline: float | None = None
-    ) -> tuple[list[_Beam], bool]:
-        # Branch-and-bound search guaranteeing the (badness, distortion)-
-        # optimal parse. cumulative badness and distortion are both
-        # monotone non-decreasing across reductions, so once any beam
-        # completes we can prune every in-flight beam whose current cost
-        # already exceeds the best completed cost.
-        #
-        # If `deadline` is provided (time.monotonic() target), the search
-        # bails out when reached, returning whatever completed beams it
-        # has found and `finished=False`.
-        best_so_far: tuple[float, float] = (math.inf, math.inf)
-
-        while not all(len(b.sequence) < 2 for b in beams):
-            if deadline is not None and time.monotonic() >= deadline:
-                completed = [b for b in beams if len(b.sequence) < 2]
-                return completed, False
-            next_beams: list[_Beam] = []
-            for beam in beams:
-                if len(beam.sequence) < 2:
-                    next_beams.append(beam)
-                    continue
-                if (beam.total_badness, beam.total_distortion) > best_so_far:
-                    continue
-                for ext in self._expand_beam(
-                    beam, prune=False, best_so_far=best_so_far
-                ):
-                    cost = (ext.total_badness, ext.total_distortion)
-                    if cost > best_so_far:
-                        continue
-                    if len(ext.sequence) < 2 and cost < best_so_far:
-                        best_so_far = cost
-                    next_beams.append(ext)
-            # best_so_far may have improved during this iteration; re-prune.
-            beams = [
-                b
-                for b in next_beams
-                if (b.total_badness, b.total_distortion) <= best_so_far
-            ]
-            if not beams:
-                break
-
-        return beams, True
-
-    def _beam_search_one_sequence(
-        self, atom_sequence: list[Atom], seq_index: int
-    ) -> list[_Beam]:
-        beams: list[_Beam] = [
-            _Beam(
-                sequence=list(atom_sequence),
-                total_badness=0,
-                total_score=0,
-                seq_index=seq_index,
-            )
-        ]
-        while not all(len(b.sequence) < 2 for b in beams):
-            next_beams: list[_Beam] = []
-            for beam in beams:
-                if len(beam.sequence) < 2:
-                    next_beams.append(beam)
-                else:
-                    next_beams.extend(self._expand_beam(beam))
-            next_beams.sort(
-                key=lambda b: (b.total_badness, b.total_distortion, -b.total_score)
-            )
-            beams = next_beams[: self.beam_width]
-        return beams
-
-    def _run_beam_search_one_or_exact(self, atom_sequence: list[Atom]) -> _Beam | None:
-        # Single beam-search dispatch: exact (with timeout fallback to
-        # beam) when _exact_search_enabled(), otherwise plain beam. Returns
-        # the lowest (badness, distortion) beam or None if the search
-        # produced nothing.
-        if self._exact_search_enabled():
-            timeout = self.exact_search_timeout
-            seed = [
-                _Beam(
-                    sequence=list(atom_sequence),
-                    total_badness=0,
-                    total_score=0,
-                    seq_index=0,
-                )
-            ]
-            deadline = time.monotonic() + timeout if timeout > 0 else None
-            seq_beams, finished = self._exact_search(seed, deadline=deadline)
-            if not finished:
-                if seq_beams:
-                    print(
-                        f"[parser] exact_search timed out after {timeout}s;"
-                        " using best completed beam",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        f"[parser] exact_search timed out after {timeout}s;"
-                        " falling back to beam search",
-                        file=sys.stderr,
-                    )
-                    seq_beams = self._beam_search_one_sequence(atom_sequence, 0)
-        else:
-            seq_beams = self._beam_search_one_sequence(atom_sequence, 0)
-
-        if not seq_beams:
-            return None
-        seq_beams.sort(
-            key=lambda b: (b.total_badness, b.total_distortion, -b.total_score)
+                for i, c in enumerate(base_iter.candidates)
+            ],
+            dominated=list(base_iter.dominated),
+            fallback_used=False,
         )
-        return seq_beams[0]
+        drop: set[int] = set(indices) - {parent_pos}
+        new_sequence = [
+            new_edge if k == parent_pos else e
+            for k, e in enumerate(state.sequence)
+            if k not in drop
+        ]
+        return _ParseState(
+            sequence=new_sequence,
+            total_badness=state.total_badness + bad,
+            total_score=state.total_score + score,
+            total_distortion=state.total_distortion + distortion,
+            iterations=[*state.iterations, iter_for_child],
+            failed=state.failed,
+            seq_index=state.seq_index,
+        )
+
+    def _reduce_sequence(
+        self, atom_sequence: list[Atom], seq_index: int = 0
+    ) -> _ParseState | None:
+        # Greedy reduction: at each step pick the single best rule
+        # application (lowest (badness, distortion); ties broken by
+        # higher score), apply it, and continue until the sequence has
+        # one element left. _expand_state's crash-fallback path produces
+        # a `failed=True` state with a :/J/.-joined edge when no rule
+        # applies, so the loop always makes progress until the sequence
+        # is fully reduced.
+        state: _ParseState = _ParseState(
+            sequence=list(atom_sequence),
+            total_badness=0,
+            total_score=0,
+            seq_index=seq_index,
+        )
+        while len(state.sequence) >= 2:
+            nxt: _ParseState | None = self._expand_state(state)
+            if nxt is None:
+                return None
+            state = nxt
+        return state
 
     def _hill_climb_atomization(
         self,
         seed_seq: list[Atom],
         alts: list[_AtomAlt],
         atom_traces: list[AtomTrace] | None = None,
-    ) -> tuple[_Beam | None, set[int], list[SubstitutionRound]]:
+    ) -> tuple[_ParseState | None, set[int], list[SubstitutionRound]]:
         # Hill-climbing label search. Starts from the all-top-1 seed;
         # while (badness, distortion) > (0, 0) and there are still
         # uncertain tokens to try, in each round attempts a single
@@ -2624,16 +2447,16 @@ class AlphaBetaParser(Parser):
         locked_subs: dict[int, str] = {}
         trial_counter: int = 0
 
-        best_beam: _Beam | None = self._run_beam_search_one_or_exact(current_seq)
-        if best_beam is None:
+        best_state: _ParseState | None = self._reduce_sequence(current_seq)
+        if best_state is None:
             return None, substituted, rounds
         # Lexicographic cost: (badness ASC, distortion ASC, -score ASC),
         # which corresponds to "minimize badness, then minimize distortion,
         # then maximize score".
         best_cost: tuple[int, int, int] = (
-            best_beam.total_badness,
-            best_beam.total_distortion,
-            -best_beam.total_score,
+            best_state.total_badness,
+            best_state.total_distortion,
+            -best_state.total_score,
         )
         self.debug_msg(
             f"Seed search cost: badness={best_cost[0]} "
@@ -2643,7 +2466,7 @@ class AlphaBetaParser(Parser):
         while (best_cost[0], best_cost[1]) != (0, 0) and remaining:
             winning_slot: int = -1
             winning_alt: _AtomAlt | None = None
-            winning_beam: _Beam | None = None
+            winning_state: _ParseState | None = None
             winning_cost: tuple[int, int, int] = best_cost
             round_record: SubstitutionRound | None = None
             if record_trials:
@@ -2663,10 +2486,10 @@ class AlphaBetaParser(Parser):
                         token_text="(no substitution)",
                         label_from="—",
                         label_to="—",
-                        badness=best_beam.total_badness,
-                        distortion=best_beam.total_distortion,
-                        score=best_beam.total_score,
-                        edge_repr=" ".join(str(e) for e in best_beam.sequence),
+                        badness=best_state.total_badness,
+                        distortion=best_state.total_distortion,
+                        score=best_state.total_score,
+                        edge_repr=" ".join(str(e) for e in best_state.sequence),
                         number=trial_counter,
                         substitutions=dict(locked_subs),
                     )
@@ -2676,13 +2499,13 @@ class AlphaBetaParser(Parser):
             for slot, alt in enumerate(remaining):
                 trial_seq: list[Atom] = list(current_seq)
                 trial_seq[alt.seq_pos] = alt.uatom
-                trial_beam = self._run_beam_search_one_or_exact(trial_seq)
-                if trial_beam is None:
+                trial_state = self._reduce_sequence(trial_seq)
+                if trial_state is None:
                     continue
                 cost = (
-                    trial_beam.total_badness,
-                    trial_beam.total_distortion,
-                    -trial_beam.total_score,
+                    trial_state.total_badness,
+                    trial_state.total_distortion,
+                    -trial_state.total_score,
                 )
                 self.debug_msg(
                     f"  trial substitute tok_idx={alt.tok_idx} → {alt.label}: "
@@ -2695,10 +2518,10 @@ class AlphaBetaParser(Parser):
                             token_text=atom_traces[alt.tok_idx].token_text,
                             label_from=atom_traces[alt.tok_idx].predicted_type,
                             label_to=alt.label,
-                            badness=trial_beam.total_badness,
-                            distortion=trial_beam.total_distortion,
-                            score=trial_beam.total_score,
-                            edge_repr=" ".join(str(e) for e in trial_beam.sequence),
+                            badness=trial_state.total_badness,
+                            distortion=trial_state.total_distortion,
+                            score=trial_state.total_score,
+                            edge_repr=" ".join(str(e) for e in trial_state.sequence),
                             number=trial_counter,
                             substitutions={**locked_subs, alt.tok_idx: alt.label},
                         )
@@ -2711,9 +2534,9 @@ class AlphaBetaParser(Parser):
                     winning_cost = cost
                     winning_slot = slot
                     winning_alt = alt
-                    winning_beam = trial_beam
+                    winning_state = trial_state
 
-            if winning_alt is None or winning_beam is None:
+            if winning_alt is None or winning_state is None:
                 if round_record is not None:
                     round_record.improved = False
                     # No swap beats the baseline → no-substitution wins.
@@ -2731,7 +2554,7 @@ class AlphaBetaParser(Parser):
                         trial.is_winner = True
                 rounds.append(round_record)
             remaining.pop(winning_slot)
-            best_beam = winning_beam
+            best_state = winning_state
             best_cost = winning_cost
             self.debug_msg(
                 f"Locked substitution tok_idx={winning_alt.tok_idx} → "
@@ -2739,11 +2562,11 @@ class AlphaBetaParser(Parser):
                 f"distortion={best_cost[1]} score={-best_cost[2]})"
             )
 
-        self.debug_msg(f"Final beam sequence: {best_beam.sequence}")
-        self.debug_msg(f"Total badness: {best_beam.total_badness}")
-        self.debug_msg(f"Total distortion: {best_beam.total_distortion}")
+        self.debug_msg(f"Final sequence: {best_state.sequence}")
+        self.debug_msg(f"Total badness: {best_state.total_badness}")
+        self.debug_msg(f"Total distortion: {best_state.total_distortion}")
         self.debug_msg(f"Substituted token indices: {sorted(substituted)}")
-        return best_beam, substituted, rounds
+        return best_state, substituted, rounds
 
     def get_sentences(self, text: str) -> list[str]:
         if self.nlp:

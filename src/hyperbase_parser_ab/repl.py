@@ -325,15 +325,15 @@ def _render_report(console: Console, trace: ParseTrace) -> None:
 def install(parser: AlphaBetaParser, session: object) -> None:
     """Register AlphaBeta-specific REPL behavior on *session*.
 
-    Only ``report`` is registered here. ``exact_search`` and
-    ``post_processing`` are already in ``accepted_params``, which means
-    the REPL exposes them to ``/set`` and ``/settings`` automatically.
-    Registering them again as plugin settings would put them in
-    ``_extra_settings``, and the REPL's ``_reset_plugin_state`` (run
-    before each parser rebuild) pops everything in ``_extra_settings``
-    from the live settings dict — so the user's ``/set`` value would
-    be wiped before ``_build_parser_kwargs`` could read it back into
-    the new parser instance.
+    Only ``report`` is registered here. ``post_processing`` is already
+    in ``accepted_params``, which means the REPL exposes it to ``/set``
+    and ``/settings`` automatically. Registering it again as a plugin
+    setting would put it in ``_extra_settings``, and the REPL's
+    ``_reset_plugin_state`` (run before each parser rebuild) pops
+    everything in ``_extra_settings`` from the live settings dict — so
+    the user's ``/set`` value would be wiped before
+    ``_build_parser_kwargs`` could read it back into the new parser
+    instance.
     """
     session.register_setting(  # type: ignore[attr-defined]
         "report",
