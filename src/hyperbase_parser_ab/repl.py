@@ -19,7 +19,12 @@ from rich.text import Text
 from rich.tree import Tree
 from spacy.tokens import Token
 
-from hyperbase_parser_ab.trace import ParseTrace, RuleIteration, SubstitutionRound
+from hyperbase_parser_ab.trace import (
+    ParseTrace,
+    RuleIteration,
+    SubstitutionRound,
+    SubstitutionTrial,
+)
 
 if TYPE_CHECKING:
     from hyperbase_parser_ab.parser import AlphaBetaParser
@@ -202,54 +207,70 @@ def _final_badness_panel(trace: ParseTrace) -> Panel | None:
     )
 
 
+def _substitution_trial_renderable(trial: SubstitutionTrial) -> Group:
+    """One attempted atom-type assignment: header (token + label change),
+    parse result, and badness/distortion/score on their own lines so the
+    parse stays readable even when long."""
+    is_winner = trial.is_winner
+    style = "bold green" if is_winner else "white"
+    marker = "★ " if is_winner else "  "
+
+    header = Text()
+    header.append(marker, style="bold green")
+    header.append(f"#{trial.number} ", style="dim")
+    if trial.tok_idx < 0:
+        header.append("(no substitution)", style="dim italic")
+    else:
+        header.append(trial.token_text, style=style)
+        header.append("  ", style="dim")
+        header.append(trial.label_from, style="cyan")
+        header.append(" → ", style="dim")
+        header.append(trial.label_to, style="yellow")
+
+    metrics = Text()
+    metrics.append("    badness=", style="dim")
+    metrics.append(str(trial.badness), style=style)
+    metrics.append("  distortion=", style="dim")
+    metrics.append(str(trial.distortion), style=style)
+    metrics.append("  score=", style="dim")
+    metrics.append(str(trial.score), style=style)
+
+    parse = Text()
+    parse.append("    parse: ", style="dim")
+    parse.append(trial.edge_repr, style=style)
+
+    return Group(header, parse, metrics, Text(""))
+
+
 def _substitution_round_panel(round_: SubstitutionRound) -> Panel:
     seed_text = Text()
     seed_text.append("starting cost: ", style="bold")
     seed_text.append(
         f"badness={round_.seed_badness} "
         f"distortion={round_.seed_distortion} "
-        f"score={round_.seed_score}\n",
+        f"score={round_.seed_score}",
         style="dim",
     )
+    attempts_count = len(round_.trials)
+    seed_text.append(
+        f"   ({attempts_count} atom-type assignment"
+        f"{'s' if attempts_count != 1 else ''} tried)\n",
+        style="dim italic",
+    )
 
-    table = Table(box=box.SIMPLE, padding=(0, 1), show_header=True)
-    table.add_column("", style="bold green", no_wrap=True)
-    table.add_column("#", style="dim", justify="right", no_wrap=True)
-    table.add_column("token", style="bold white")
-    table.add_column("from", style="cyan")
-    table.add_column("to", style="yellow")
-    table.add_column("badness", style="dim", justify="right")
-    table.add_column("distortion", style="dim", justify="right")
-    table.add_column("score", style="dim", justify="right")
-    table.add_column("parse", style="white")
-
+    body: list[object] = [seed_text]
     if not round_.trials:
-        table.add_row(
-            "", "", Text("(no trials)", style="dim italic"), "", "", "", "", "", ""
-        )
+        body.append(Text("(no trials)", style="dim italic"))
     else:
         for trial in round_.trials:
-            style = "bold green" if trial.is_winner else "white"
-            marker = "★" if trial.is_winner else ""
-            table.add_row(
-                Text(marker, style="bold green"),
-                Text(str(trial.number), style=style),
-                Text(trial.token_text, style=style),
-                Text(trial.label_from, style=style),
-                Text(trial.label_to, style=style),
-                Text(str(trial.badness), style=style),
-                Text(str(trial.distortion), style=style),
-                Text(str(trial.score), style=style),
-                Text(trial.edge_repr, style=style),
-            )
+            body.append(_substitution_trial_renderable(trial))
 
     border = "magenta" if round_.improved else "yellow"
     suffix = " (no improvement)" if not round_.improved else ""
-    title = "[bold magenta]Substitution Round "
-    f"{round_.round_idx}{suffix}[/bold magenta]"
-    return Panel(
-        Group(seed_text, table), title=title, border_style=border, box=box.ROUNDED
+    title = (
+        f"[bold magenta]Substitution Round {round_.round_idx}{suffix}[/bold magenta]"
     )
+    return Panel(Group(*body), title=title, border_style=border, box=box.ROUNDED)
 
 
 def _totals_panel(trace: ParseTrace) -> Panel:

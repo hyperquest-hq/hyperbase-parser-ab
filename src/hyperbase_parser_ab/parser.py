@@ -194,20 +194,21 @@ class AlphaBetaParser(Parser):
                 ),
                 "required": False,
             },
-            "uncertain_atom_ratio": {
+            "min_atom_prob_threshold": {
                 "type": float,
-                "default": 0,
+                "default": 0.9,
                 "description": (
-                    "Fraction of a sentence's *eligible* tokens treated as "
-                    "uncertain. A token is eligible only when its top-2 "
-                    "atomizer label has a different main type (first "
-                    "character) from top-1 — same-main-type runner-ups "
-                    "(e.g. Cd/Cx) are considered fixed at top-1. Eligible "
-                    "tokens are ranked ascending by top-1 probability and "
-                    "the bottom `int(ratio * len(eligible))` get the "
-                    "runner-up label as a viable alternative in seed "
-                    "sequences. 0 disables alternatives; 1 considers "
-                    "every eligible token uncertain."
+                    "Minimum top-1 probability for the primary atom "
+                    "classification to be trusted. Tokens whose top-1 "
+                    "probability is below this threshold are treated as "
+                    "uncertain and the runner-up label is offered as a "
+                    "viable alternative in seed sequences. A token is only "
+                    "considered uncertain when its top-2 atomizer label "
+                    "also has a different main type (first character) from "
+                    "top-1 — same-main-type runner-ups (e.g. Cd/Cx) are "
+                    "considered fixed at top-1. Set to 0 to disable "
+                    "alternatives; 1 considers every eligible token "
+                    "uncertain."
                 ),
                 "required": False,
                 "reload": False,
@@ -227,7 +228,7 @@ class AlphaBetaParser(Parser):
         }
 
     def apply_live_setting(self, name: str, value: Any) -> None:  # noqa: ANN401
-        if name == "uncertain_atom_ratio":
+        if name == "min_atom_prob_threshold":
             value = min(1.0, max(0.0, float(value)))
         super().apply_live_setting(name, value)
 
@@ -245,8 +246,8 @@ class AlphaBetaParser(Parser):
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
         self.n_workers: int = max(1, int(self.params.get("n_workers", 1)))
-        self.uncertain_atom_ratio: float = min(
-            1.0, max(0.0, float(self.params.get("uncertain_atom_ratio", 0)))
+        self.min_atom_prob_threshold: float = min(
+            1.0, max(0.0, float(self.params.get("min_atom_prob_threshold", 0.9)))
         )
         self.post_processing: bool = bool(self.params.get("post_processing", True))
         self._worker_pool: ProcessPoolExecutor | None = None
@@ -1118,14 +1119,13 @@ class AlphaBetaParser(Parser):
 
         # Eligibility: top-2 exists and has a different main type (first
         # character) from top-1. Same-main-type runner-ups (e.g. Cd vs Cx)
-        # are just subtype refinements and stay fixed at top-1. The
-        # uncertain_atom_ratio is then applied against the eligible pool;
-        # the bottom int(ratio * len(eligible)) by top-1 probability
-        # become uncertain.
+        # are just subtype refinements and stay fixed at top-1. Among the
+        # eligible pool, any token whose top-1 probability is strictly
+        # below `min_atom_prob_threshold` becomes uncertain.
         top1_scores: list[float] = [
             (cands[0][1] if cands else 1.0) for cands in top_candidates
         ]
-        eligible_indices: list[int] = []
+        uncertain_indices: set[int] = set()
         for tok_idx, (top1_label, candidates) in enumerate(
             zip(atom_types, top_candidates, strict=True)
         ):
@@ -1134,13 +1134,8 @@ class AlphaBetaParser(Parser):
             top2_label: str = candidates[1][0]
             if not top2_label or top1_label[0] == top2_label[0]:
                 continue
-            eligible_indices.append(tok_idx)
-        n_uncertain: int = int(self.uncertain_atom_ratio * len(eligible_indices))
-        if n_uncertain > 0:
-            eligible_indices.sort(key=lambda i: top1_scores[i])
-            uncertain_indices: set[int] = set(eligible_indices[:n_uncertain])
-        else:
-            uncertain_indices = set()
+            if top1_scores[tok_idx] < self.min_atom_prob_threshold:
+                uncertain_indices.add(tok_idx)
 
         # Build the seed sequence (top-1 only) and the per-token traces.
         seed_seq: list[Atom] = []
