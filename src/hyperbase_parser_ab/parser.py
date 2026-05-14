@@ -1304,6 +1304,22 @@ class AlphaBetaParser(Parser):
         # ("parent belongs to the first separated group"). Separator
         # children's own subtrees contribute to neither side.
         #
+        # Exception: a "group" is a maximal run of consecutive non-
+        # separator children (the sibling chunk between two separators
+        # or between an end and a separator). Within a group, if any
+        # direct-sibling token corresponds to a P-atom (predicate),
+        # that token *and every later non-separator sibling in the
+        # same group* are exempt from criterion 3.12 — their subtree
+        # atoms are zeroed out of `child_sub` so they contribute to
+        # neither `left_set` nor `right_set`. Effect: extracting a
+        # from-P-onwards token across the separator is silent, but
+        # extracting an earlier token of the same group (before its
+        # first P-sibling) is still penalised. Predicates legitimately
+        # reach across X/J boundaries to gather their arguments, so we
+        # don't want to penalise candidates that pull them out — but
+        # the parent's pre-P siblings still need to attach before
+        # straddling.
+        #
         # Walks spaCy directly (not the DPT) because X-tokens are
         # dropped from token2atom and would otherwise be invisible.
         self._dpt_separators = {}
@@ -1327,6 +1343,13 @@ class AlphaBetaParser(Parser):
                     out.add(ua)
             return out
 
+        def child_is_p(tok: Token) -> bool:
+            a = self.token2atom.get(tok)
+            if a is None:
+                return False
+            ua = self.orig_atom.get(a)
+            return ua is not None and ua.mtype() == "P"
+
         for tok in root.subtree:
             a = self.token2atom.get(tok)
             if a is None:
@@ -1338,10 +1361,27 @@ class AlphaBetaParser(Parser):
             sep_positions: list[int] = [i for i, c in enumerate(children) if is_sep(c)]
             if not sep_positions:
                 continue
+            # Mark each non-separator child as exempt iff a P-sibling
+            # has already appeared earlier in the same group (or the
+            # child itself is a P-sibling). Separators reset the
+            # "seen P" flag — exemption never crosses a separator.
+            child_exempt: list[bool] = [False] * len(children)
+            seen_p_in_group: bool = False
+            for idx, c in enumerate(children):
+                if is_sep(c):
+                    seen_p_in_group = False
+                    continue
+                if not seen_p_in_group and child_is_p(c):
+                    seen_p_in_group = True
+                if seen_p_in_group:
+                    child_exempt[idx] = True
             child_sub: list[frozenset[UniqueAtom]] = [
-                frozenset() if is_sep(c) else frozenset(subtree_atoms(c))
-                for c in children
+                frozenset()
+                if (is_sep(c) or child_exempt[idx])
+                else frozenset(subtree_atoms(c))
+                for idx, c in enumerate(children)
             ]
+
             pairs: list[tuple[frozenset[UniqueAtom], frozenset[UniqueAtom]]] = []
             for i in sep_positions:
                 left: set[UniqueAtom] = {parent_ua}
