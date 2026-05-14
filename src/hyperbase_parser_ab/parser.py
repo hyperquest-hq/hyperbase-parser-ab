@@ -186,7 +186,7 @@ class AlphaBetaParser(Parser):
             },
             "beam_width": {
                 "type": int,
-                "default": 5,
+                "default": 1,
                 "description": (
                     "Beam search width for the reduction loop. 1 (default) "
                     "is greedy. Higher values keep multiple parse hypotheses "
@@ -237,7 +237,7 @@ class AlphaBetaParser(Parser):
             },
             "uncertain_atom_ratio": {
                 "type": float,
-                "default": 0.15,
+                "default": 0,
                 "description": (
                     "Fraction of a sentence's *eligible* tokens treated as "
                     "uncertain. A token is eligible only when its top-2 "
@@ -258,10 +258,10 @@ class AlphaBetaParser(Parser):
                 "default": True,
                 "description": (
                     "If True (default), apply the post-search transforms "
-                    "(_apply_arg_roles, _repair, _normalise_modifiers, "
-                    "_post_process) to the winning beam's edge before "
-                    "returning. If False, return the raw beam-search edge "
-                    "unchanged. Useful for debugging the search output."
+                    "(_apply_arg_roles, _deepen_modifiers) to the winning "
+                    "beam's edge before returning. If False, return the raw "
+                    "beam-search edge unchanged. Useful for debugging the "
+                    "search output."
                 ),
                 "required": False,
                 "reload": False,
@@ -288,14 +288,14 @@ class AlphaBetaParser(Parser):
         self.atom_lang: str = self.lang if lang_namespace else ""
         self.use_atomizer_subtype: bool = self.params.get("use_atomizer_subtype", True)
         self.atomizer_model_path: str | None = self.params.get("atomizer_model_path")
-        self.beam_width: int = max(1, int(self.params.get("beam_width", 5)))
+        self.beam_width: int = max(1, int(self.params.get("beam_width", 1)))
         self.exact_search: bool = bool(self.params.get("exact_search", False))
         self.exact_search_timeout: float = float(
-            self.params.get("exact_search_timeout", 30.0)
+            self.params.get("exact_search_timeout", 10.0)
         )
         self.n_workers: int = max(1, int(self.params.get("n_workers", 1)))
         self.uncertain_atom_ratio: float = min(
-            1.0, max(0.0, float(self.params.get("uncertain_atom_ratio", 0.15)))
+            1.0, max(0.0, float(self.params.get("uncertain_atom_ratio", 0)))
         )
         self.post_processing: bool = bool(self.params.get("post_processing", True))
         self._worker_pool: ProcessPoolExecutor | None = None
@@ -332,6 +332,18 @@ class AlphaBetaParser(Parser):
         self._dpt_directed: set[tuple[UniqueAtom, UniqueAtom]] = set()
         self._dpt_parent_of: dict[UniqueAtom, UniqueAtom] = {}
         self._dpt_children_of: dict[UniqueAtom, set[UniqueAtom]] = {}
+        # Atoms found to be "stranded" — i.e. left bare at the top of the
+        # final hyperedge or force-joined via the :/J/. iteration-level
+        # fallback — at a previous pass of the current parse. Drives the
+        # sliding-window per-position fallback inside _expand_beam: that
+        # block fires only for positions whose entity carries one of these
+        # atoms. Empty on the first pass; grown across passes by
+        # _detect_stranded until it stabilises.
+        self._stranded_atoms: set[UniqueAtom] = set()
+        # Atoms consumed by the :/J/. iteration-level fallback during the
+        # current pass. Captured at the fallback site in _expand_beam,
+        # reset between passes.
+        self._force_joined_atoms: set[UniqueAtom] = set()
         # Most recently parsed sub-sentence text, captured for the
         # /dpt REPL diagnostic command (which re-parses and walks the
         # result for per-edge distortion analysis). Populated on every
@@ -376,6 +388,24 @@ class AlphaBetaParser(Parser):
 
         self._repl_session = session
         install(self, session)
+
+    def _detect_stranded(self, final_edge: Hyperedge) -> set[UniqueAtom]:
+        # Returns the set of original atoms that "never satisfied a rule"
+        # in the just-completed pass: atoms at depth 1 of `final_edge`
+        # whose mtype is pivot-capable (so the failure is a real one, not
+        # a legitimate punctuation leaf) plus atoms that the
+        # iteration-level :/J/. fallback in _expand_beam force-joined
+        # during the pass (captured into self._force_joined_atoms).
+        pivot_capable: set[str] = {r.first_type for r in RULES}
+        stranded: set[UniqueAtom] = set()
+        if not final_edge.atom:
+            for child in final_edge:
+                if child.atom and child.mtype() in pivot_capable:
+                    ua = self.orig_atom.get(cast(Atom, child))
+                    if ua is not None:
+                        stranded.add(ua)
+        stranded |= self._force_joined_atoms
+        return stranded
 
     def parse_sentence(self, sentence: str) -> list[ParseResult]:
         sentence = re.sub(r"\s+", " ", sentence).strip()
@@ -573,17 +603,44 @@ class AlphaBetaParser(Parser):
                 )
 
             edge: Hyperedge | None = None
-            best_beam: _Beam | None
-            substituted: set[int]
-            sub_rounds: list[SubstitutionRound]
-            if forced_substitutions is not None:
-                best_beam = self._run_beam_search_one_or_exact(seed_seq)
-                substituted = set(forced_substitutions.keys())
-                sub_rounds = []
-            else:
-                best_beam, substituted, sub_rounds = self._hill_climb_atomization(
-                    seed_seq, alts, atom_traces=atom_traces
-                )
+            best_beam: _Beam | None = None
+            substituted: set[int] = set()
+            sub_rounds: list[SubstitutionRound] = []
+            # Two-pass orchestration. First attempt runs vanilla (empty
+            # _stranded_atoms keeps the sliding-window block in
+            # _expand_beam a no-op). After each attempt we look at the
+            # raw final edge plus any atoms force-joined by the :/J/.
+            # fallback and add them to _stranded_atoms. If the stranded
+            # set grew, re-run the search so the sliding-window block
+            # can rescue those atoms. Stop once the set stabilises or a
+            # cap is hit.
+            self._stranded_atoms = set()
+            max_passes: int = 4
+            for _attempt in range(max_passes):
+                self._force_joined_atoms = set()
+                if forced_substitutions is not None:
+                    best_beam = self._run_beam_search_one_or_exact(seed_seq)
+                    substituted = set(forced_substitutions.keys())
+                    sub_rounds = []
+                else:
+                    best_beam, substituted, sub_rounds = self._hill_climb_atomization(
+                        seed_seq, alts, atom_traces=atom_traces
+                    )
+                if (
+                    best_beam is None
+                    or best_beam.failed
+                    or len(best_beam.sequence) != 1
+                ):
+                    raw_final = None
+                else:
+                    raw_final = non_unique(best_beam.sequence[0])
+                if raw_final is None:
+                    new_stranded = set(self._force_joined_atoms)
+                else:
+                    new_stranded = self._detect_stranded(raw_final)
+                if new_stranded <= self._stranded_atoms:
+                    break
+                self._stranded_atoms |= new_stranded
 
             # Reflect any locked-in substitutions in the per-token traces
             # before they're attached: chosen_label_rank=1 marks the alt
@@ -654,21 +711,11 @@ class AlphaBetaParser(Parser):
                     self.debug_msg(f"After applying argument roles: {edge!s}")
                     if self._cur_trace is not None:
                         self._cur_trace.post_processing.append(("arg_roles", str(edge)))
-                    edge = self._repair(edge)
-                    self.debug_msg(f"After repair: {edge!s}")
-                    if self._cur_trace is not None:
-                        self._cur_trace.post_processing.append(("repair", str(edge)))
-                    edge = self._normalise_modifiers(edge)
-                    self.debug_msg(f"After modifier normalisation: {edge!s}")
+                    edge = self._deepen_modifiers(edge)
+                    self.debug_msg(f"After deepening modifiers: {edge!s}")
                     if self._cur_trace is not None:
                         self._cur_trace.post_processing.append(
-                            ("normalise_modifiers", str(edge))
-                        )
-                    edge = self._post_process(edge)
-                    self.debug_msg(f"After post-processing: {edge!s}")
-                    if self._cur_trace is not None and edge is not None:
-                        self._cur_trace.post_processing.append(
-                            ("post_process", str(edge))
+                            ("deepen_modifiers", str(edge))
                         )
                 else:
                     self.debug_msg("Post-processing disabled — keeping raw beam edge.")
@@ -854,6 +901,63 @@ class AlphaBetaParser(Parser):
                 if innner_conn in {"P", "T"}:
                     return hedge(((edge[0], edge[1][0]), *edge[1][1:]))
 
+        return edge
+
+    def _canonical(self, atom: Atom) -> UniqueAtom:
+        uatom: UniqueAtom = UniqueAtom(atom)
+        return self.orig_atom.get(uatom, uatom)
+
+    def _arg_contains_canonical_atom(self, arg: Hyperedge, target: UniqueAtom) -> bool:
+        return any(self._canonical(a) == target for a in arg.all_atoms())
+
+    @staticmethod
+    def _is_plus_compound(edge: Hyperedge) -> bool:
+        # +/B/. (and argrole'd variants like +/B.am/.) compound builders.
+        # Treated as opaque by the deepen-modifier stage so modifiers
+        # don't get pushed inside a compound concept.
+        if edge.atom or not edge[0].atom:
+            return False
+        return cast(Atom, edge[0]).root() == "+"
+
+    def _try_deepen_modifier(self, edge: Hyperedge) -> Hyperedge:
+        # edge has the form (m/M E); push m/M into the deepest E-arg
+        # justified by the DPT. Recurses so the modifier can cascade
+        # through several levels in one go. Never swaps past another
+        # modifier — if E is itself an M-edge, leave the structure alone.
+        if edge[1].atom:
+            return edge
+        if edge[1].cmt == "M":
+            return edge
+        if self._is_plus_compound(edge[1]):
+            return edge
+        m_atom: Hyperedge = edge[0]
+        inner: Hyperedge = edge[1]
+        m_parent: UniqueAtom | None = self._dpt_parent_of.get(self._canonical(m_atom))
+        if m_parent is None:
+            return edge
+        for i in range(1, len(inner)):
+            arg: Hyperedge = inner[i]
+            if self._arg_contains_canonical_atom(arg, m_parent):
+                new_arg: Hyperedge = hedge([m_atom, arg])
+                new_arg = self._try_deepen_modifier(new_arg)
+                new_inner: list[Hyperedge] = list(inner)
+                new_inner[i] = new_arg
+                return hedge(new_inner)
+        return edge
+
+    def _deepen_modifiers(self, edge: Hyperedge) -> Hyperedge:
+        if edge.atom:
+            return edge
+        if self._is_plus_compound(edge):
+            return edge
+        new_edge: Hyperedge | None = hedge(
+            [self._deepen_modifiers(subedge) for subedge in edge]
+        )
+        if new_edge is None:
+            return edge
+        edge = new_edge
+        if edge.cmt == "M" and len(edge) == 2 and not edge[1].atom:
+            return self._try_deepen_modifier(edge)
         return edge
 
     def _update_atom(self, old: Atom, new: Atom) -> None:
@@ -2136,6 +2240,50 @@ class AlphaBetaParser(Parser):
                     continue
                 _try_candidate(rule_number, rule, (pa, pb), pa)
 
+        # Sliding-window per-position fallback for known-stranded atoms.
+        # When a previous pass over the same sentence detected that some
+        # atom was left bare at the top of the final hyperedge (or
+        # force-joined by the iteration-level :/J/. fallback), that atom
+        # is recorded in self._stranded_atoms. Here we generate extra
+        # candidates for any position whose entity carries one of those
+        # stranded atoms and whose position is otherwise uncovered by
+        # the DPT-driven (or sibling-exception) candidates. For each
+        # such position P we slide a window of size rule.size across P
+        # for every rule whose first_type matches beam.sequence[P].mtype();
+        # apply_rule_indices scans pivot positions internally, so any
+        # window where P validly pivots is accepted. With an empty
+        # self._stranded_atoms (the first pass) the whole block is a
+        # no-op.
+        seq_len: int = len(beam.sequence)
+        if seq_len >= 2 and self._stranded_atoms:
+            covered: set[int] = set()
+            for _ca in cand_actions:
+                covered.update(_ca[2])
+            for pos in range(seq_len):
+                if pos in covered:
+                    continue
+                pos_orig_atoms: set[UniqueAtom] = set()
+                for a in beam.sequence[pos].all_atoms():
+                    ua = self.orig_atom.get(a)
+                    if ua is not None:
+                        pos_orig_atoms.add(ua)
+                if not (pos_orig_atoms & self._stranded_atoms):
+                    continue
+                pos_mtype: str = beam.sequence[pos].mtype()
+                for rule_number, rule in enumerate(RULES):
+                    if rule.first_type != pos_mtype:
+                        continue
+                    size: int = rule.size
+                    if size > seq_len:
+                        continue
+                    for k in range(size):
+                        ws: int = pos - k
+                        we: int = ws + size - 1
+                        if ws < 0 or we >= seq_len:
+                            continue
+                        indices = tuple(range(ws, we + 1))
+                        _try_candidate(rule_number, rule, indices, pos)
+
         # Drop A if there exists B != A with A's signature a strict subset
         # of B's AND A and B share the same no_dangling status. Only
         # candidates whose rule has can_dominate=True can act as the
@@ -2230,6 +2378,14 @@ class AlphaBetaParser(Parser):
         if not cand_actions:
             base_iter.fallback_used = True
             if len(beam.sequence) > 0:
+                # Record the atoms consumed by this force-join so the
+                # outer parse-orchestration loop can mark them stranded
+                # and re-run with the sliding-window fallback enabled.
+                for fj_edge in beam.sequence[:2]:
+                    for fj_atom in fj_edge.all_atoms():
+                        fj_ua = self.orig_atom.get(fj_atom)
+                        if fj_ua is not None:
+                            self._force_joined_atoms.add(fj_ua)
                 fallback: Hyperedge = hedge([":/J/.", *beam.sequence[:2]])
                 new_sequence: list[Hyperedge] = (
                     [fallback] if fallback else []

@@ -332,7 +332,7 @@ class TestParserBeamSearch:
 
     def test_default_beam_width(self):
         parser = _make_parser()
-        assert parser.beam_width == 5
+        assert parser.beam_width == 1
 
     def test_beam_width_param_is_read(self):
         with (
