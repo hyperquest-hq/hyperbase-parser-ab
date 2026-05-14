@@ -1915,27 +1915,33 @@ class AlphaBetaParser(Parser):
         lines.append("")
 
     def _candidate_dominance_atoms(self, edge: Hyperedge) -> frozenset:
-        # Each atom contributes by atom_str with the argroles subpart
-        # stripped, so two argrole variants of the same connector collapse
-        # to a single signature element — otherwise the strict-subset
-        # dominance check would never fire across candidates whose argroles
-        # differ. We can't use orig_atom here: UniqueAtom hashes by
-        # id(atom_obj), and the atoms in `edge` were freshly wrapped after
-        # _apply_arg_roles, so they never match keys registered earlier.
-        # Rule-introduced specials (e.g. '+/B/.', ':/J/.') normalize the
-        # same way ('+/B.am/.' -> '+/B/.'), so a parse carrying an extra
-        # connector still differs from one that lacks it but is invariant
-        # to its argrole binding.
-        sig: list[str] = []
+        # Each atom contributes a position-stable identity key, so two
+        # distinct sequence atoms that share the same atom_str (e.g. two
+        # `o/Md` determiners at different positions) get *different* sig
+        # elements — keying on atom_str would dedupe them via frozenset
+        # and let a candidate consuming one o/Md falsely dominate a
+        # candidate consuming the other.
+        #
+        # Token-derived atoms key on token.i (invariant across argrole
+        # rewraps). Rule-introduced atoms (no token mapping — '+/B/.',
+        # ':/J/.') key on the canonical seed UniqueAtom's atom_obj id:
+        # an atom that came from a prior iteration resolves to the same
+        # seed across every candidate that consumes it, while a freshly
+        # introduced connector stays unique per candidate. Atoms inside
+        # `edge` are UniqueAtoms (post-`unique()`), but UniqueAtom hashes
+        # by id of its atom_obj, so we unwrap once before the orig_atom
+        # lookup — otherwise a double-wrap shifts the hash and the seed
+        # registered by _apply_arg_roles never matches.
+        sig: list[tuple[str, int]] = []
         for a in edge.all_atoms():
-            atom_str: str = a.atom_str
-            parts: list[str] = atom_str.split("/")
-            if len(parts) >= 2:
-                role: list[str] = parts[1].split(".")
-                if len(role) >= 2:
-                    parts[1] = role[0]
-                    atom_str = "/".join(parts)
-            sig.append(atom_str)
+            token: Token | None = self.atom2token.get(a)
+            if token is not None:
+                sig.append(("tok", token.i))
+                continue
+            bare: Atom = a.atom_obj if isinstance(a, UniqueAtom) else a
+            uatom: UniqueAtom = UniqueAtom(bare)
+            canon: UniqueAtom = self.orig_atom.get(uatom, uatom)
+            sig.append(("id", id(canon.atom_obj)))
         return frozenset(sig)
 
     def _plus_builder_bonus(self, edge: Hyperedge) -> int:
