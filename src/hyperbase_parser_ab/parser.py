@@ -2680,14 +2680,6 @@ class AlphaBetaParser(Parser):
             return hedge(flattened)
         return edge
 
-    def _post_process(self, edge: Hyperedge | None) -> Hyperedge | None:
-        if edge is None:
-            return None
-        _edge: Hyperedge = self._fix_argroles(edge)
-        _edge = self._process_colon_conjunctions(_edge)
-        _edge = self._flatten_conjunctions(_edge)
-        return _edge
-
 
 # Worker-process state. Each spawned process gets its own AlphaBetaParser
 # instance, lazily constructed by _worker_init on pool startup.
