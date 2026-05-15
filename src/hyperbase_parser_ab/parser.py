@@ -1417,17 +1417,17 @@ class AlphaBetaParser(Parser):
             if pairs:
                 self._dpt_separators[parent_ua] = pairs
 
-    def _score(
+    def _score_base(
         self, edges: list[Hyperedge], new_edge: Hyperedge, parent_pos: int
-    ) -> tuple[int, bool]:
-        # Candidates are dep-connected by construction (parent + dep-children),
-        # so the connectivity term is gone. The score is the non-dangling
-        # bonus plus a depth term (mdepth * 100) that rewards bottom-up
-        # reductions — the candidate's shallowest atom should sit deep in
-        # the dep tree — and an atom-count tiebreaker. Returns (score,
-        # no_dangling) so callers can use the no_dangling flag for the
-        # dominance filter without recomputing _no_dangling_branches.
-        no_dangling: bool = self._no_dangling_branches(edges, new_edge, parent_pos)
+    ) -> int:
+        # Cheap part of the per-candidate score: a depth term
+        # (mdepth * 100) that rewards bottom-up reductions — the
+        # candidate's shallowest atom should sit deep in the dep tree —
+        # plus an atom-count tiebreaker. The 10M no_dangling bonus is
+        # *not* added here; _expand_state computes no_dangling lazily
+        # (only for candidates that actually need it for dominance
+        # parity or for the optimum-tier walk in winner selection) and
+        # uses it directly rather than as a score component.
         mdepth: int = 9999999
         n: int = 0
         for edge in edges:
@@ -1439,8 +1439,7 @@ class AlphaBetaParser(Parser):
                         depth: int = self.depths[oatom]
                         if depth < mdepth:
                             mdepth = depth
-        score: int = (10000000 if no_dangling else 0) + (mdepth * 100) + n
-        return score, no_dangling
+        return (mdepth * 100) + n
 
     @staticmethod
     def _is_special_transparent_atom(atom: Atom) -> bool:
@@ -2100,12 +2099,20 @@ class AlphaBetaParser(Parser):
         others: list[int] = [
             v for v in range(len(virtual)) if v != new_edge_v and v != x_v
         ]
+        # Cache mtypes once per call. Hyperedge.mtype() is memoised on the
+        # edge so the cost is one dict lookup per virtual position; the
+        # combo prefilter below indexes into this list ~rule.size times
+        # per combo and avoids the ~2µs apply_rule_indices function-call
+        # overhead on the ~98% of combos that are type-incompatible.
+        mtype_at: list[str] = [virtual[i].mtype() for i in range(len(virtual))]
         # Try small rules first so easy absorptions short-circuit before
         # we enumerate combinatorial extras for the larger P/B rules.
         for rule in sorted(RULES, key=lambda r: r.size):
             need_extra: int = rule.size - 2
             if need_extra < 0 or need_extra > len(others):
                 continue
+            first_type: str = rule.first_type
+            arg_types: set[str] = rule.arg_types
             combos: Any
             if need_extra == 0:
                 combos = ((),)
@@ -2114,6 +2121,22 @@ class AlphaBetaParser(Parser):
             for extras in combos:
                 indices: list[int] = sorted({new_edge_v, x_v, *extras})
                 if len(indices) != rule.size:
+                    continue
+                # Type prefilter (sound under-approximation of
+                # apply_rule_indices' pivot scan): at least one position
+                # must carry rule.first_type, and every position's mtype
+                # must belong to first_type or arg_types. False positives
+                # are harmless — the call below still does the full check.
+                has_first: bool = False
+                all_ok: bool = True
+                for i in indices:
+                    t: str = mtype_at[i]
+                    if t == first_type:
+                        has_first = True
+                    elif t not in arg_types:
+                        all_ok = False
+                        break
+                if not (has_first and all_ok):
                     continue
                 result = apply_rule_indices(rule, virtual, indices, self.atom2token)
                 if result is None:
@@ -2170,7 +2193,10 @@ class AlphaBetaParser(Parser):
         cand_records: list[RuleCandidate] = []
         cand_signatures: list[frozenset] = []
         cand_can_dominate: list[bool] = []
-        cand_no_dangling: list[bool] = []
+        # Lazy: None until _no_dangling_branches has been computed for this
+        # candidate. Filled in by get_no_dangling() during the dominance
+        # filter or the winner-selection tier walk.
+        cand_no_dangling: list[bool | None] = []
         cand_mandatory: list[bool] = []
         # True iff the candidate was produced by the stranded-atom
         # sliding-window rescue. Such candidates are immune to
@@ -2239,7 +2265,7 @@ class AlphaBetaParser(Parser):
                 self._fix_argroles(self._apply_arg_roles(non_unique(new_edge)))
             )
             window: list[Hyperedge] = [state.sequence[k] for k in indices]
-            base_score, no_dangling = self._score(window, new_edge, parent_pos)
+            base_score: int = self._score_base(window, new_edge, parent_pos)
             score: int = base_score + self._plus_builder_bonus(new_edge)
             bad: int = self._candidate_badness(new_edge)
             distortion: int = self._distortion_delta(
@@ -2261,7 +2287,7 @@ class AlphaBetaParser(Parser):
             cand_actions.append((score, new_edge, indices, bad, distortion, parent_pos))
             cand_signatures.append(self._candidate_dominance_atoms(new_edge))
             cand_can_dominate.append(rule.can_dominate)
-            cand_no_dangling.append(no_dangling)
+            cand_no_dangling.append(None)
             cand_mandatory.append(rule.mandatory)
             cand_sliding_window.append(is_sliding_window)
             cand_sw_priority.append(sw_priority)
@@ -2578,6 +2604,22 @@ class AlphaBetaParser(Parser):
                     args_k.add(_norm_atom_str(cast(Atom, arg).atom_str))
             cand_arg_norms.append(args_k)
 
+        # Lazy no_dangling: the heavy `_no_dangling_branches` call is
+        # deferred until the dominance parity guard or the winner-selection
+        # tier walk actually needs the bit. Result is cached in
+        # cand_no_dangling[k] (None means "not yet computed"). The closure
+        # is rebound below after cand_no_dangling and cand_actions are
+        # filtered to the dominance survivors.
+        def get_no_dangling(k: int) -> bool:
+            cached: bool | None = cand_no_dangling[k]
+            if cached is not None:
+                return cached
+            _, edge_k, indices_k, _, _, parent_pos_k = cand_actions[k]
+            window_k: list[Hyperedge] = [state.sequence[i] for i in indices_k]
+            val: bool = self._no_dangling_branches(window_k, edge_k, parent_pos_k)
+            cand_no_dangling[k] = val
+            return val
+
         keep: list[bool] = [True] * n
         for i in range(n):
             # Sliding-window rescue candidates are immune to dominance:
@@ -2589,11 +2631,15 @@ class AlphaBetaParser(Parser):
             for j in range(n):
                 if i == j or not cand_can_dominate[j]:
                     continue
-                if cand_no_dangling[i] != cand_no_dangling[j]:
-                    continue
                 if cand_mandatory[i] and not cand_mandatory[j]:
                     continue
+                # Cheap structural checks first; the no_dangling parity
+                # guard (originally evaluated up front) is moved to the
+                # very end of each branch so get_no_dangling() is only
+                # invoked when dominance would actually fire.
                 if cand_signatures[i] < cand_signatures[j]:
+                    if get_no_dangling(i) != get_no_dangling(j):
+                        continue
                     keep[i] = False
                     break
                 a_conn: str | None = cand_conn_norm[i]
@@ -2613,6 +2659,8 @@ class AlphaBetaParser(Parser):
                 )
                 if a_bd < b_bd:
                     continue
+                if get_no_dangling(i) != get_no_dangling(j):
+                    continue
                 keep[i] = False
                 break
         base_iter.dominated = [cand_records[i] for i in range(n) if not keep[i]]
@@ -2621,6 +2669,10 @@ class AlphaBetaParser(Parser):
         cand_mandatory = [cand_mandatory[i] for i in range(n) if keep[i]]
         cand_sliding_window = [cand_sliding_window[i] for i in range(n) if keep[i]]
         cand_sw_priority = [cand_sw_priority[i] for i in range(n) if keep[i]]
+        # Keep cand_no_dangling aligned with the filtered cand_actions so
+        # get_no_dangling() — which closes over both names — stays correct
+        # for the winner-selection tier walk below.
+        cand_no_dangling = [cand_no_dangling[i] for i in range(n) if keep[i]]
 
         if not cand_actions:
             base_iter.fallback_used = True
@@ -2659,19 +2711,24 @@ class AlphaBetaParser(Parser):
                 seq_index=state.seq_index,
             )
 
-        # Pick the single first-place candidate by
-        # (badness ASC, distortion ASC, score DESC). A mandatory rule
-        # that ranks first short-circuits the same way every other
-        # candidate would have — there's only one survivor either way.
-        # If any sliding-window rescue candidates survived, the winner
-        # must come from that subset: their whole purpose is to break
-        # the previous pass's stranding, so committing to one is the
-        # mechanism by which the rescue takes effect. Among SW winners
-        # the rescue priority comes first: earlier-stranded atoms
-        # (lower pass index) outrank later-stranded ones, so the
-        # rescue commits to the longest-known strand before serving a
-        # fresher one. Only after priority+badness+distortion ties
-        # does score break the remaining ambiguity.
+        # Pick the single first-place candidate.
+        #
+        # Equivalent to the previous (badness ASC, distortion ASC,
+        # score DESC) sort where score = base_score + 10M*no_dangling:
+        # within the optimum (badness, distortion) tier, the 10M bonus
+        # always pushes a no_dangling=True candidate above any
+        # no_dangling=False peer (10M dominates any base_score gap), and
+        # ties between no_dangling=True peers are broken by base_score.
+        # We reproduce that ordering by walking the optimum tier in
+        # -base_score order and picking the first no_dangling=True
+        # candidate; if none exists, we fall back to the highest-base
+        # candidate in the tier. no_dangling is computed lazily — most
+        # candidates outside the tier never need it.
+        #
+        # Sliding-window candidates take precedence as before: when any
+        # SW survived, only SW candidates are considered, ordered by
+        # (sw_priority ASC, badness, distortion, base_score DESC) with
+        # the same tier-walk for the no_dangling tie-break.
         indexed: list[
             tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int, int]]
         ] = list(enumerate(cand_actions))
@@ -2690,9 +2747,35 @@ class AlphaBetaParser(Parser):
                 )
 
             indexed.sort(key=_sw_sort_key)
+
+            def _prio(idx: int) -> int:
+                p: int | None = cand_sw_priority[idx]
+                return p if p is not None else 1_000_000
+
+            top_prio: int = _prio(indexed[0][0])
+            opt_bad: int = indexed[0][1][3]
+            opt_dist: int = indexed[0][1][4]
+            tier: list[
+                tuple[int, tuple[int, Hyperedge, tuple[int, ...], int, int, int]]
+            ] = [
+                ic
+                for ic in indexed
+                if _prio(ic[0]) == top_prio
+                and ic[1][3] == opt_bad
+                and ic[1][4] == opt_dist
+            ]
         else:
             indexed.sort(key=lambda ic: (ic[1][3], ic[1][4], -ic[1][0]))
-        cand_idx, (score, new_edge, indices, bad, distortion, parent_pos) = indexed[0]
+            opt_bad = indexed[0][1][3]
+            opt_dist = indexed[0][1][4]
+            tier = [
+                ic for ic in indexed if ic[1][3] == opt_bad and ic[1][4] == opt_dist
+            ]
+        winner_ic = next(
+            (ic for ic in tier if get_no_dangling(ic[0])),
+            tier[0],
+        )
+        cand_idx, (score, new_edge, indices, bad, distortion, parent_pos) = winner_ic
         iter_for_child: RuleIteration = RuleIteration(
             iteration=base_iter.iteration,
             sequence_repr=base_iter.sequence_repr,
