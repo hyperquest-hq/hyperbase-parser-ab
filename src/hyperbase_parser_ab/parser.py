@@ -292,27 +292,31 @@ class AlphaBetaParser(Parser):
         self._dpt_separators: dict[
             UniqueAtom, list[tuple[frozenset[UniqueAtom], frozenset[UniqueAtom]]]
         ] = {}
-        # Atoms found to be "stranded" — i.e. left bare at the top of the
-        # final hyperedge or force-joined via the :/J/. iteration-level
-        # fallback — at a previous pass of the current parse. Drives the
-        # sliding-window per-position fallback inside _expand_state: that
-        # block fires only for positions whose entity carries one of these
-        # atoms. Empty on the first pass; grown across passes by
+        # Groups found to be "stranded" — i.e. left bare at the top of
+        # the final hyperedge or force-joined via the :/J/.
+        # iteration-level fallback — at a previous pass of the current
+        # parse. Each group is a frozenset of UniqueAtoms: singleton
+        # for a stranded atom, multi-element for a stranded non-atom
+        # hyperedge (identified by the set of original atoms its leaves
+        # map back to via self.orig_atom). Drives the sliding-window
+        # per-position fallback inside _expand_state: that block fires
+        # only for positions whose leaf-set exactly matches one of
+        # these groups. Empty on the first pass; grown across passes by
         # _detect_stranded until it stabilises.
-        self._stranded_atoms: set[UniqueAtom] = set()
-        # Pass index at which each stranded atom first entered
-        # self._stranded_atoms. Used to prioritize sliding-window
+        self._stranded_sets: set[frozenset[UniqueAtom]] = set()
+        # Pass index at which each stranded group first entered
+        # self._stranded_sets. Used to prioritize sliding-window
         # rescue candidates: when multiple SW candidates tie on
-        # (badness, distortion), the one rescuing the atom stranded
+        # (badness, distortion), the one rescuing the group stranded
         # *earliest* wins. The intuition is that older strands are the
         # ones the orchestration loop has been trying hardest to
-        # rescue, and outranking them with a freshly-stranded atom's
+        # rescue, and outranking them with a freshly-stranded group's
         # rescue undoes that work.
-        self._strand_pass_idx: dict[UniqueAtom, int] = {}
-        # Atoms consumed by the :/J/. iteration-level fallback during the
-        # current pass. Captured at the fallback site in _expand_state,
-        # reset between passes.
-        self._force_joined_atoms: set[UniqueAtom] = set()
+        self._strand_pass_idx: dict[frozenset[UniqueAtom], int] = {}
+        # Groups consumed by the :/J/. iteration-level fallback during
+        # the current pass. Captured at the fallback site in
+        # _expand_state, reset between passes.
+        self._force_joined_sets: set[frozenset[UniqueAtom]] = set()
         # Most recently parsed sub-sentence text, captured for the
         # /dpt REPL diagnostic command (which re-parses and walks the
         # result for per-edge distortion analysis). Populated on every
@@ -352,22 +356,51 @@ class AlphaBetaParser(Parser):
         self._repl_session = session
         install(self, session)
 
-    def _detect_stranded(self, final_edge: Hyperedge) -> set[UniqueAtom]:
-        # Returns the set of original atoms that "never satisfied a rule"
-        # in the just-completed pass: atoms at depth 1 of `final_edge`
-        # whose mtype is pivot-capable (so the failure is a real one, not
-        # a legitimate punctuation leaf) plus atoms that the
-        # iteration-level :/J/. fallback in _expand_state force-joined
-        # during the pass (captured into self._force_joined_atoms).
+    def _uatom_set(self, edge: Hyperedge) -> frozenset[UniqueAtom]:
+        # Collect the UniqueAtom identities of every leaf atom under
+        # `edge` that maps back through self.orig_atom. Synthetic
+        # connectors (+/B/., :/J/., ...) are absent from orig_atom, so
+        # they're naturally filtered. Used to give a non-atom hyperedge
+        # an identity stable across passes: alt UniqueAtoms collapse to
+        # their primary via orig_atom, so a strand recorded with primary
+        # atoms still matches a later-pass hyperedge that happens to use
+        # an alt for the same token.
+        if edge.atom:
+            ua = self.orig_atom.get(cast(Atom, edge))
+            return frozenset({ua}) if ua is not None else frozenset()
+        result: set[UniqueAtom] = set()
+        for child in edge:
+            result |= self._uatom_set(child)
+        return frozenset(result)
+
+    def _detect_stranded(self, final_edge: Hyperedge) -> set[frozenset[UniqueAtom]]:
+        # Returns the set of stranded groups that "never satisfied a
+        # rule" in the just-completed pass. A group is a frozenset of
+        # UniqueAtoms — a singleton for an atom strand, multi-element
+        # for a non-atom hyperedge strand. Sources:
+        #   - any depth-1 child of `final_edge` whose mtype is
+        #     pivot-capable (so the failure is a real one, not a
+        #     legitimate punctuation leaf or an R-/S-typed end form),
+        #     covering both bare atoms and non-atom hyperedges that no
+        #     outer rule absorbed,
+        #   - plus groups that the iteration-level :/J/. fallback in
+        #     _expand_state force-joined during the pass (captured into
+        #     self._force_joined_sets).
         pivot_capable: set[str] = {r.first_type for r in RULES}
-        stranded: set[UniqueAtom] = set()
+        stranded: set[frozenset[UniqueAtom]] = set()
         if not final_edge.atom:
             for child in final_edge:
-                if child.atom and child.mtype() in pivot_capable:
+                if child.mtype() not in pivot_capable:
+                    continue
+                if child.atom:
                     ua = self.orig_atom.get(cast(Atom, child))
                     if ua is not None:
-                        stranded.add(ua)
-        stranded |= self._force_joined_atoms
+                        stranded.add(frozenset({ua}))
+                else:
+                    child_set = self._uatom_set(child)
+                    if child_set:
+                        stranded.add(child_set)
+        stranded |= self._force_joined_sets
         return stranded
 
     def parse_sentence(self, sentence: str) -> list[ParseResult]:
@@ -571,18 +604,20 @@ class AlphaBetaParser(Parser):
             substituted: set[int] = set()
             sub_rounds: list[SubstitutionRound] = []
             # Two-pass orchestration. First attempt runs vanilla (empty
-            # _stranded_atoms keeps the sliding-window block in
+            # _stranded_sets keeps the sliding-window block in
             # _expand_state a no-op). After each attempt we look at the
-            # raw final edge plus any atoms force-joined by the :/J/.
-            # fallback and add them to _stranded_atoms. If the stranded
+            # raw final edge plus any groups force-joined by the :/J/.
+            # fallback and add them to _stranded_sets. If the stranded
             # set grew, re-run the search so the sliding-window block
-            # can rescue those atoms. Stop once the set stabilises or a
-            # cap is hit.
-            self._stranded_atoms = set()
+            # can rescue those groups. Stop once the set stabilises or
+            # a cap is hit. A "group" is a frozenset of UniqueAtoms —
+            # singleton for a stranded atom, multi-element for a
+            # stranded non-atom hyperedge.
+            self._stranded_sets = set()
             self._strand_pass_idx = {}
             max_passes: int = 4
             for _attempt in range(max_passes):
-                self._force_joined_atoms = set()
+                self._force_joined_sets = set()
                 if forced_substitutions is not None:
                     best_state = self._reduce_sequence(seed_seq)
                     substituted = set(forced_substitutions.keys())
@@ -600,19 +635,21 @@ class AlphaBetaParser(Parser):
                 else:
                     raw_final = non_unique(best_state.sequence[0])
                 if raw_final is None:
-                    new_stranded = set(self._force_joined_atoms)
+                    new_stranded = set(self._force_joined_sets)
                 else:
                     new_stranded = self._detect_stranded(raw_final)
                 if self._cur_trace is not None:
                     self._cur_trace.passes.append(
-                        sorted(str(ua) for ua in new_stranded)
+                        sorted(
+                            "+".join(sorted(str(ua) for ua in g)) for g in new_stranded
+                        )
                     )
-                if new_stranded <= self._stranded_atoms:
+                if new_stranded <= self._stranded_sets:
                     break
                 pass_idx: int = _attempt + 1
-                for ua in new_stranded - self._stranded_atoms:
-                    self._strand_pass_idx[ua] = pass_idx
-                self._stranded_atoms |= new_stranded
+                for g in new_stranded - self._stranded_sets:
+                    self._strand_pass_idx[g] = pass_idx
+                self._stranded_sets |= new_stranded
 
             # Reflect any locked-in substitutions in the per-token traces
             # before they're attached: chosen_label_rank=1 marks the alt
@@ -2198,16 +2235,16 @@ class AlphaBetaParser(Parser):
         # filter or the winner-selection tier walk.
         cand_no_dangling: list[bool | None] = []
         cand_mandatory: list[bool] = []
-        # True iff the candidate was produced by the stranded-atom
+        # True iff the candidate was produced by the stranded-group
         # sliding-window rescue. Such candidates are immune to
         # dominance and short-circuit winner selection: if any
         # survives, the iteration must commit to one of them.
         cand_sliding_window: list[bool] = []
-        # Priority of the stranded atom this candidate is rescuing —
-        # the pass index at which that atom first entered
-        # self._stranded_atoms. Lower = older = higher priority. Used
+        # Priority of the stranded group this candidate is rescuing —
+        # the pass index at which that group first entered
+        # self._stranded_sets. Lower = older = higher priority. Used
         # to break ties among SW winners so the rescue of the
-        # longest-known stranded atom is preferred over the rescue of
+        # longest-known stranded group is preferred over the rescue of
         # a freshly-stranded one. None for non-SW candidates.
         cand_sw_priority: list[int | None] = []
 
@@ -2470,47 +2507,43 @@ class AlphaBetaParser(Parser):
                     continue
                 _try_candidate(rule_number, rule, (pa, pb), pa)
 
-        # Sliding-window per-position fallback for known-stranded atoms.
-        # When a previous pass over the same sentence detected that some
-        # atom was left bare at the top of the final hyperedge (or
-        # force-joined by the iteration-level :/J/. fallback), that atom
-        # is recorded in self._stranded_atoms. Here we generate extra
-        # candidates for any position whose entity carries one of those
-        # stranded atoms. The atom is provably stuck, so we want every
-        # alternative composition involving it — coverage by other
-        # candidates is *not* a reason to skip, since those other
-        # candidates are typically the ones whose resolution left the
-        # atom stranded in the first place. For each such position P we
-        # slide a window of size rule.size across P for every rule
+        # Sliding-window per-position fallback for known-stranded
+        # groups. When a previous pass over the same sentence detected
+        # that some atom or non-atom hyperedge was left bare at the top
+        # of the final hyperedge (or force-joined by the iteration-level
+        # :/J/. fallback), that group's leaf-UniqueAtom frozenset is
+        # recorded in self._stranded_sets. Here we generate extra
+        # candidates for any position whose leaf-set exactly matches
+        # one of those stranded groups. The group is provably stuck, so
+        # we want every alternative composition involving it — coverage
+        # by other candidates is *not* a reason to skip, since those
+        # other candidates are typically the ones whose resolution left
+        # the group stranded in the first place. For each such position
+        # P we slide a window of size rule.size across P for every rule
         # where P's mtype is *either* the pivot type (first_type) or
         # one of the arg types: apply_rule_indices scans pivot
         # positions internally, so any window where the types fit is
         # accepted. Allowing P to land in an arg slot is critical —
-        # once a previous SW rescue has already wrapped the stranded
-        # atom into an edge of a different mtype, the only way to keep
+        # once a previous SW rescue has already wrapped the strand
+        # into an edge of a different mtype, the only way to keep
         # composing is to let some neighboring pivot absorb that edge.
-        # With an empty self._stranded_atoms (the first pass) the whole
-        # block is a no-op.
+        # The exact-match leaf-set check is also the natural one-shot
+        # guard: once the group gets wrapped into a larger hyperedge
+        # (alone or alongside other atoms), the wrapping position's
+        # leaf-set is a strict superset and won't match — so the
+        # rescue fires only while the strand is still bare, mirroring
+        # the previous "bare atom only" invariant. With an empty
+        # self._stranded_sets (the first pass) the whole block is a
+        # no-op.
         seq_len: int = len(state.sequence)
-        if seq_len >= 2 and self._stranded_atoms:
+        if seq_len >= 2 and self._stranded_sets:
             for pos in range(seq_len):
-                # Only fire SW for positions that *are themselves* a
-                # bare stranded atom. Once the atom has been wrapped
-                # into a hyperedge (by an earlier SW rescue this pass,
-                # or by an ordinary DPT candidate), the rescue is
-                # finished — re-firing for it would just churn the
-                # same atom through more compositions and starve other
-                # pending strands. Atoms nested inside an edge at this
-                # position aren't bare here, so they correctly fall
-                # through.
                 seq_pos: Hyperedge = state.sequence[pos]
-                if not seq_pos.atom:
+                pos_set: frozenset[UniqueAtom] = self._uatom_set(seq_pos)
+                if not pos_set or pos_set not in self._stranded_sets:
                     continue
-                pos_ua: UniqueAtom | None = self.orig_atom.get(cast(Atom, seq_pos))
-                if pos_ua is None or pos_ua not in self._stranded_atoms:
-                    continue
-                pos_sw_priority: int = self._strand_pass_idx.get(pos_ua, 1_000_000)
-                pos_mtype: str = state.sequence[pos].mtype()
+                pos_sw_priority: int = self._strand_pass_idx.get(pos_set, 1_000_000)
+                pos_mtype: str = seq_pos.mtype()
                 for rule_number, rule in enumerate(RULES):
                     if rule.first_type != pos_mtype and pos_mtype not in rule.arg_types:
                         continue
@@ -2677,24 +2710,29 @@ class AlphaBetaParser(Parser):
         if not cand_actions:
             base_iter.fallback_used = True
             if len(state.sequence) > 0:
-                # Record stranded atoms — connector-capable atoms that
-                # never satisfied any rule at their position. A sequence
-                # element that's *itself* a bare atom at the moment the
-                # :/J/. fallback fires means no rule ever absorbed it
-                # (not as pivot, not as arg); if the rest of the
-                # sequence had been able to consume it, it would have
-                # been wrapped into some edge already. Non-atom
-                # sequence elements contribute nothing — every atom
-                # nested inside them was absorbed by some earlier rule.
+                # Record stranded groups — pivot-capable sequence
+                # elements that never satisfied any rule at their
+                # position. A bare atom at sequence[0] or sequence[1]
+                # at the moment the :/J/. fallback fires means no rule
+                # ever absorbed it (not as pivot, not as arg). The same
+                # logic holds for non-atom hyperedges at those
+                # positions: they were built earlier in the pass but
+                # never absorbed by an outer rule before the fallback,
+                # so the *whole* group is stranded at the hyperedge
+                # level. We record both, keyed by their leaf
+                # UniqueAtom frozenset.
                 pivot_capable: set[str] = {r.first_type for r in RULES}
                 for fj_edge in state.sequence[:2]:
-                    if not fj_edge.atom:
-                        continue
                     if fj_edge.mtype() not in pivot_capable:
                         continue
-                    fj_ua = self.orig_atom.get(cast(Atom, fj_edge))
-                    if fj_ua is not None:
-                        self._force_joined_atoms.add(fj_ua)
+                    if fj_edge.atom:
+                        fj_ua = self.orig_atom.get(cast(Atom, fj_edge))
+                        if fj_ua is not None:
+                            self._force_joined_sets.add(frozenset({fj_ua}))
+                    else:
+                        fj_set = self._uatom_set(fj_edge)
+                        if fj_set:
+                            self._force_joined_sets.add(fj_set)
                 fallback: Hyperedge = hedge([":/J/.", *state.sequence[:2]])
                 new_sequence: list[Hyperedge] = (
                     [fallback] if fallback else []

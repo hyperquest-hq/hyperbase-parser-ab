@@ -81,9 +81,12 @@ class ParseTrace:
     total_badness: int = 0
     total_distortion: int = 0
     substitution_rounds: list[SubstitutionRound] = field(default_factory=list)
-    # Stranded-atom set detected after each pass of the orchestration
-    # loop in parse_spacy_sentence. One entry per pass actually
-    # performed, in order; len(passes) == number of passes.
+    # Stranded-group set detected after each pass of the orchestration
+    # loop in parse_spacy_sentence. Each group is rendered as the "+"
+    # join of its sorted leaf-atom strings (a singleton string for an
+    # atom strand, "a+b+c" for a non-atom hyperedge strand). One entry
+    # per pass actually performed, in order; len(passes) == number of
+    # passes.
     passes: list[list[str]] = field(default_factory=list)
 
 
