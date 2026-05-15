@@ -23,6 +23,7 @@ from spacy.tokens import Doc, Span, Token
 
 from hyperbase_parser_ab.alpha import Alpha
 from hyperbase_parser_ab.lang_models import SPACY_MODELS
+from hyperbase_parser_ab.language_specific import apply_candidate_overrides
 from hyperbase_parser_ab.rules import RULES, Rule, apply_rule_indices
 from hyperbase_parser_ab.trace import (
     AtomTrace,
@@ -1150,6 +1151,24 @@ class AlphaBetaParser(Parser):
             )
             assert self.alpha is not None, "Alpha must be initialized before parsing"
             atom_types, top_candidates = self.alpha.predict(sentence, features)
+
+        # Per-language overrides reorder top-K candidates and can force
+        # uncertainty for specific token/label patterns. See
+        # language_specific.apply_candidate_overrides.
+        forced_uncertain: set[int] = set()
+        new_top_candidates: list[list[tuple[str, float]]] = []
+        for tok_idx, cands in enumerate(top_candidates):
+            new_cands, force_unc = apply_candidate_overrides(
+                self.lang, sentence[tok_idx], cands
+            )
+            new_top_candidates.append(new_cands)
+            if force_unc:
+                forced_uncertain.add(tok_idx)
+        top_candidates = new_top_candidates
+        atom_types = [
+            (cands[0][0] if cands else atom_types[i])
+            for i, cands in enumerate(top_candidates)
+        ]
         atom_types = self._fix_atom_classifications(sentence, atom_types)
 
         self.token2atom = {}
@@ -1158,11 +1177,13 @@ class AlphaBetaParser(Parser):
         # character) from top-1. Same-main-type runner-ups (e.g. Cd vs Cx)
         # are just subtype refinements and stay fixed at top-1. Among the
         # eligible pool, any token whose top-1 probability is strictly
-        # below `min_atom_prob_threshold` becomes uncertain.
+        # below `min_atom_prob_threshold` becomes uncertain. Tokens flagged
+        # by language-specific overrides are uncertain regardless of
+        # probability.
         top1_scores: list[float] = [
             (cands[0][1] if cands else 1.0) for cands in top_candidates
         ]
-        uncertain_indices: set[int] = set()
+        uncertain_indices: set[int] = set(forced_uncertain)
         for tok_idx, (top1_label, candidates) in enumerate(
             zip(atom_types, top_candidates, strict=True)
         ):
