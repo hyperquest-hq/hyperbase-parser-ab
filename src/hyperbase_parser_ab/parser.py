@@ -938,7 +938,13 @@ class AlphaBetaParser(Parser):
             return edge
         m_atom: Hyperedge = edge[0]
         inner: Hyperedge = edge[1]
-        m_parent: UniqueAtom | None = self._dpt_parent_of.get(self._canonical(m_atom))
+        # When the modifier slot itself is a chain (e.g. (pelo/Mx
+        # menos/Mx)), `_canonical` can't accept a non-atomic Hyperedge.
+        # Walk to the chain's head atom — `inner_atom()` recurses down
+        # the second-arg path, which is exactly the modifier-chain
+        # nesting axis.
+        m_head: Atom = cast(Atom, m_atom) if m_atom.atom else m_atom.inner_atom()
+        m_parent: UniqueAtom | None = self._dpt_parent_of.get(self._canonical(m_head))
         if m_parent is None:
             return edge
         for i in range(1, len(inner)):
@@ -2214,6 +2220,66 @@ class AlphaBetaParser(Parser):
                 return True
         return False
 
+    def _stranded_p_sibling_distortion(
+        self,
+        rule: Rule,
+        indices: tuple[int, ...],
+        parent_pos: int,
+        cur_seq: list[Hyperedge],
+        tok2pos: dict[Token, int],
+    ) -> int:
+        # When a P-rule fires, charge +1 per DPT-child of the predicate
+        # pivot atom that is outside the candidate window AND whose live
+        # edge mtype is one the parser still owes work on. Concretely we
+        # charge whenever the outside mtype falls in
+        # `rule.arg_types | {"P", "M"}`:
+        # - arg_types ({C,R,S} for P): a directly attachable arg was
+        #   left out of this firing and cannot be folded in later
+        #   without re-doing the predicate edge.
+        # - P: an embedded predicate that has not yet been wrapped into
+        #   a relation; its parent cannot fold a bare P as an arg.
+        # - M: a modifier-child that should wrap the pivot before its
+        #   P-rule fires; leaving it outside means the predicate fires
+        #   pre-modification, the modifier strands, and the recovery
+        #   path produces malformed wraps.
+        # Excluded ({T, J, B}): these legitimately stay outside the
+        # P-rule window. T wraps the eventual relation into a Specifier
+        # (Trigger→Specifier), J wraps coordinated args, B wraps
+        # builder phrases — all of them need other material to be built
+        # first and re-enter through normal type propagation.
+        #
+        # Coordination dep tags ({conj, parataxis}) are also exempt:
+        # a conj-child of the pivot is a coordinated sibling (e.g.
+        # "Maria loves X but Pedro prefers Y" — prefers is conj of
+        # loves). Those get joined externally by a J-connector rather
+        # than folded as args, so they intentionally stay outside the
+        # P-rule window. Mirrors the C-rule's dep_blockers={"conj"}.
+        if rule.first_type != "P":
+            return 0
+        pivot_edge: Hyperedge = cur_seq[parent_pos]
+        pivot_atoms: set[UniqueAtom] = self._sh_head_atoms(pivot_edge)
+        if not pivot_atoms:
+            return 0
+        window: set[int] = set(indices)
+        charge_types: set[str] = rule.arg_types | {"P", "M"}
+        coord_deps: set[str] = {"conj", "parataxis"}
+        extra: int = 0
+        for pivot_ua in pivot_atoms:
+            if pivot_ua.mtype() != "P":
+                continue
+            for child_ua in self._dpt_children_of.get(pivot_ua, set()):
+                child_tok: Token | None = self.atom2token.get(child_ua)
+                if child_tok is None:
+                    continue
+                if child_tok.dep_ in coord_deps:
+                    continue
+                child_pos: int | None = tok2pos.get(child_tok)
+                if child_pos is None or child_pos in window:
+                    continue
+                if cur_seq[child_pos].mtype() in charge_types:
+                    extra += 1
+        return extra
+
     def _candidate_badness(self, edge: Hyperedge) -> int:
         total: int = 0
         try:
@@ -2330,6 +2396,9 @@ class AlphaBetaParser(Parser):
                 new_edge, relaxed=rule.relaxed_head_satisfaction
             )
             distortion += _sibling_gap_distortion(indices)
+            distortion += self._stranded_p_sibling_distortion(
+                rule, indices, parent_pos, state.sequence, tok2pos
+            )
             cand_records.append(
                 RuleCandidate(
                     rule_index=rule_number,
