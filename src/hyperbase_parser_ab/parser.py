@@ -27,6 +27,8 @@ from hyperbase_parser_ab.language_specific import apply_candidate_overrides
 from hyperbase_parser_ab.rules import RULES, Rule, apply_rule_indices
 from hyperbase_parser_ab.trace import (
     AtomTrace,
+    ManualCandidate,
+    ManualPickFn,
     ParseTrace,
     RuleCandidate,
     RuleIteration,
@@ -337,6 +339,13 @@ class AlphaBetaParser(Parser):
         self._repl_session: Any = None
         self._cur_trace: ParseTrace | None = None
         self._cur_sequence: list[Hyperedge] | None = None
+        # Set by parse_sentence/parse_spacy_sentence for the duration of
+        # a single parse. When non-None, _expand_state defers the
+        # winner pick to this callback instead of taking the automatic
+        # (badness, distortion, score) tier-walk choice. Also forces
+        # _cur_trace on and the hill-climb path off, so the user's
+        # decision chain is exactly what gets recorded.
+        self._manual_pick: ManualPickFn | None = None
 
     def debug_msg(self, msg: str) -> None:
         if self.debug:
@@ -405,7 +414,12 @@ class AlphaBetaParser(Parser):
         stranded |= self._force_joined_sets
         return stranded
 
-    def parse_sentence(self, sentence: str) -> list[ParseResult]:
+    def parse_sentence(
+        self,
+        sentence: str,
+        manual_pick: ManualPickFn | None = None,
+        force_trace: bool = False,
+    ) -> list[ParseResult]:
         sentence = re.sub(r"\s+", " ", sentence).strip()
 
         if self.nlp:
@@ -416,7 +430,10 @@ class AlphaBetaParser(Parser):
                 offset: int = 0
                 for sent in self.doc.sents:
                     parse: ParseResult | None = self.parse_spacy_sentence(
-                        sent, offset=offset
+                        sent,
+                        offset=offset,
+                        manual_pick=manual_pick,
+                        force_trace=force_trace,
                     )
                     if parse:
                         parses.append(parse)
@@ -571,9 +588,21 @@ class AlphaBetaParser(Parser):
         prediction: tuple[tuple[str, ...] | list[str], list[list[tuple[str, float]]]]
         | None = None,
         forced_substitutions: dict[int, str] | None = None,
+        manual_pick: ManualPickFn | None = None,
+        force_trace: bool = False,
     ) -> ParseResult | None:
+        prior_manual_pick: ManualPickFn | None = self._manual_pick
         try:
-            self._cur_trace = ParseTrace() if self._report_enabled() else None
+            self._manual_pick = manual_pick
+            self._cur_trace = (
+                ParseTrace()
+                if (
+                    self._report_enabled()
+                    or self._manual_pick is not None
+                    or force_trace
+                )
+                else None
+            )
             self._last_parsed_sentence = str(sent)
 
             seed_seq: list[Atom]
@@ -618,11 +647,23 @@ class AlphaBetaParser(Parser):
             self._stranded_sets = set()
             self._strand_pass_idx = {}
             max_passes: int = 4
+            # Manual mode skips hill-climbing for the same reason
+            # forced_substitutions does: each pick triggers user input,
+            # and replaying the entire reduce loop across many alt
+            # seeds would multiply that interaction without any
+            # automatic-quality signal to optimize against.
+            skip_hill_climb: bool = (
+                forced_substitutions is not None or self._manual_pick is not None
+            )
             for _attempt in range(max_passes):
                 self._force_joined_sets = set()
-                if forced_substitutions is not None:
+                if skip_hill_climb:
                     best_state = self._reduce_sequence(seed_seq)
-                    substituted = set(forced_substitutions.keys())
+                    substituted = (
+                        set(forced_substitutions.keys())
+                        if forced_substitutions is not None
+                        else set()
+                    )
                     sub_rounds = []
                 else:
                     best_state, substituted, sub_rounds = self._hill_climb_atomization(
@@ -769,6 +810,11 @@ class AlphaBetaParser(Parser):
             print(f'Caught exception: {e!s} while parsing: "{sent!s}"')
             traceback.print_exc()
             return None
+        finally:
+            # Restore the prior callback so a manual-mode parse that
+            # crashes mid-sentence can't leak its callback into a later
+            # automatic parse from the same parser instance.
+            self._manual_pick = prior_manual_pick
 
     def _has_flat_name(self, edge: Hyperedge) -> bool:
         for atom in edge.all_atoms():
@@ -2931,11 +2977,62 @@ class AlphaBetaParser(Parser):
             tier = [
                 ic for ic in indexed if ic[1][3] == opt_bad and ic[1][4] == opt_dist
             ]
-        winner_ic = next(
+        # Automatic default — preserves prior behavior exactly: walk the
+        # optimum (badness, distortion) tier in -base_score order, pick
+        # the first no_dangling=True candidate, else the first.
+        default_ic = next(
             (ic for ic in tier if get_no_dangling(ic[0])),
             tier[0],
         )
+
+        if self._manual_pick is not None:
+            # Manual mode: hand the full set of dominance-survivors to
+            # the user-supplied picker so they can override the
+            # automatic winner. We deliberately show every survivor
+            # (not just the optimum tier or the SW-only subset) — the
+            # user is the authority and may want to commit to a
+            # candidate the automatic comparator would never choose.
+            # The default index points at what the automatic logic
+            # would have picked, so a "press Enter to accept"
+            # interaction reproduces today's behavior.
+            manual_cands: list[ManualCandidate] = []
+            for i, (sc, ne, _ix, b, d, pp) in enumerate(cand_actions):
+                manual_cands.append(
+                    ManualCandidate(
+                        rule_repr=base_iter.candidates[i].rule_repr,
+                        new_edge_repr=str(ne),
+                        badness=b,
+                        distortion=d,
+                        score=sc,
+                        no_dangling=get_no_dangling(i),
+                        pos=pp,
+                        is_sliding_window=cand_sliding_window[i],
+                    )
+                )
+            default_idx: int = default_ic[0]
+            try:
+                chosen_idx = int(self._manual_pick(manual_cands, default_idx))
+            except Exception:
+                chosen_idx = default_idx
+            if not (0 <= chosen_idx < len(cand_actions)):
+                chosen_idx = default_idx
+            winner_ic = (chosen_idx, cand_actions[chosen_idx])
+        else:
+            winner_ic = default_ic
         cand_idx, (score, new_edge, indices, bad, distortion, parent_pos) = winner_ic
+        # Force-compute no_dangling for every survivor when the trace
+        # is being recorded, so the per-iteration record carries the
+        # bit for the full candidate set (downstream consumers — REPL
+        # report panels, /genparse training data — assume it is
+        # always present). Skipped when the trace is off so automatic
+        # parses still pay the lazy cost only.
+        cand_no_dangling_full: list[bool | None]
+        if self._cur_trace is not None:
+            cand_no_dangling_full = [
+                get_no_dangling(i) for i in range(len(cand_actions))
+            ]
+        else:
+            cand_no_dangling_full = [None] * len(cand_actions)
         iter_for_child: RuleIteration = RuleIteration(
             iteration=base_iter.iteration,
             sequence_repr=base_iter.sequence_repr,
@@ -2950,6 +3047,7 @@ class AlphaBetaParser(Parser):
                     distortion=c.distortion,
                     is_winner=(i == cand_idx),
                     indices=list(c.indices) if c.indices is not None else None,
+                    no_dangling=cand_no_dangling_full[i],
                 )
                 for i, c in enumerate(base_iter.candidates)
             ],

@@ -7,9 +7,32 @@ dataclasses on ``ParseResult.extra``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from hyperbase_parser_ab.rules import Rule
+
+
+@dataclass(frozen=True)
+class ManualCandidate:
+    """Snapshot of a rule-candidate at the winner-pick step, passed to the
+    manual-mode picker callback. Carries everything the user needs to see
+    to decide which candidate is correct, without exposing internal
+    parser state."""
+
+    rule_repr: str
+    new_edge_repr: str
+    badness: int
+    distortion: int
+    score: int
+    no_dangling: bool
+    pos: int
+    is_sliding_window: bool
+
+
+# Signature: (candidates, default_index) -> chosen_index.
+# Returning `default_index` reproduces the automatic winner.
+ManualPickFn = Callable[[list[ManualCandidate], int], int]
 
 
 @dataclass
@@ -36,6 +59,12 @@ class RuleCandidate:
     distortion: int = 0
     is_winner: bool = False
     indices: list[int] | None = None
+    # None when not computed (the no_dangling probe is lazy in
+    # automatic mode and only the optimum tier needs it). Populated for
+    # every dominance-survivor when the trace is being recorded, so
+    # downstream consumers (e.g. /genparse training data) can rely on
+    # the bit being present.
+    no_dangling: bool | None = None
 
 
 @dataclass

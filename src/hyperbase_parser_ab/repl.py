@@ -391,6 +391,16 @@ def install(parser: AlphaBetaParser, session: object) -> None:
         "Re-parse last sentence and dump per-edge distortion analysis.",
         _make_dpt_command(parser, session),
     )
+    from hyperbase_parser_ab.genparse import _make_genparse_command
+
+    session.register_command(  # type: ignore[attr-defined]
+        "genparse",
+        (
+            "Interactively generate a corpus of correct candidate choices: "
+            "/genparse <input.jsonl> <output.jsonl> (paths optional after first run)."
+        ),
+        _make_genparse_command(parser, session),
+    )
 
 
 def _make_sub_command(
