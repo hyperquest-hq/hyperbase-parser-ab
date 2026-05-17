@@ -40,8 +40,7 @@ RULES: list[Rule] = [
         consecutive_siblings_ok=True,
         relaxed_head_satisfaction=True,
     ),
-    # Rule("M", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2),
-    Rule("M", {"C", "M", "T", "P"}, 2),
+    Rule("M", {"C", "M", "T", "P", "S"}, 2),
     Rule("B", {"C"}, 3),
     Rule("T", {"C", "R"}, 2),
     Rule("P", {"C", "R", "S"}, 6, can_dominate=False),
@@ -49,11 +48,8 @@ RULES: list[Rule] = [
     Rule("P", {"C", "R", "S"}, 4, can_dominate=False),
     Rule("P", {"C", "R", "S"}, 3, can_dominate=False),
     Rule("P", {"C", "R", "S"}, 2, can_dominate=False),
-    # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 3, can_dominate=False),
-    # Rule("J", {"C", "R", "M", "S", "T", "P", "B", "J"}, 2, can_dominate=False),
     Rule("J", {"R"}, 3, can_dominate=False),
     Rule("J", {"C"}, 3, can_dominate=False),
-    # Rule("J", {"C", "R"}, 2, can_dominate=False),
 ]
 
 

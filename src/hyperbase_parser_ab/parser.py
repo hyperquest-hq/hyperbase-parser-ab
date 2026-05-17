@@ -219,8 +219,9 @@ class AlphaBetaParser(Parser):
                 "default": True,
                 "description": (
                     "If True (default), apply the post-search transforms "
-                    "(_apply_arg_roles, _deepen_modifiers) to the reduced "
-                    "edge before returning. If False, return the raw edge "
+                    "(_apply_arg_roles, _deepen_modifiers, "
+                    "_apply_modifier_to_trigger) to the reduced edge "
+                    "before returning. If False, return the raw edge "
                     "unchanged. Useful for debugging the search output."
                 ),
                 "required": False,
@@ -723,6 +724,12 @@ class AlphaBetaParser(Parser):
                         self._cur_trace.post_processing.append(
                             ("deepen_modifiers", str(edge))
                         )
+                    edge = self._apply_modifier_to_trigger(edge)
+                    self.debug_msg(f"After applying modifiers to triggers: {edge!s}")
+                    if self._cur_trace is not None:
+                        self._cur_trace.post_processing.append(
+                            ("apply_modifier_to_trigger", str(edge))
+                        )
                 else:
                     self.debug_msg("Post-processing disabled — keeping raw edge.")
                     if self._cur_trace is not None:
@@ -792,16 +799,18 @@ class AlphaBetaParser(Parser):
         head_token: Token | None = self._head_token(edge)
         if not head_token:
             return "?"
-        dep: str = head_token.dep_
+        else:
+            return self._token_arg_role(head_token)
 
+    def _token_arg_role(self, token: Token) -> str:
+        dep: str = token.dep_
         # subject
-        if dep in {"nsubj", "sb"}:
-            return "s"
-        # passive subject (becomes object)
-        elif dep in {"nsubjpass", "nsubj:pass"}:
-            return "o"
-        # agent (becomes subject)
-        elif dep == "agent":
+        if dep in {
+            "nsubj",
+            "sb",
+            # agent (becomes subject)
+            "agent",
+        }:
             return "s"
         # object
         elif dep in {
@@ -812,13 +821,15 @@ class AlphaBetaParser(Parser):
             "oprd",
             "acomp",
             "attr",
-            # "ROOT",
             "oa",
             "pd",
             # clausal complement, these are probably going to be nested relations
             "xcomp",
             "ccomp",
             "oc",
+            # passive subject (becomes object)
+            "nsubjpass",
+            "nsubj:pass",
         }:
             return "o"
         elif dep in {
@@ -970,6 +981,27 @@ class AlphaBetaParser(Parser):
         edge = new_edge
         if edge.cmt == "M" and len(edge) == 2 and not edge[1].atom:
             return self._try_deepen_modifier(edge)
+        return edge
+
+    def _apply_modifier_to_trigger(self, edge: Hyperedge) -> Hyperedge:
+        # Rewrite (m/M (t/T x ...)) as ((m/M t/T) x ...) so the modifier
+        # attaches directly to the trigger connector instead of wrapping
+        # the whole trigger edge.
+        if edge.atom:
+            return edge
+        new_edge: Hyperedge | None = hedge(
+            [self._apply_modifier_to_trigger(subedge) for subedge in edge]
+        )
+        if new_edge is None:
+            return edge
+        edge = new_edge
+        if (
+            edge.cmt == "M"
+            and len(edge) == 2
+            and not edge[1].atom
+            and edge[1].cmt == "T"
+        ):
+            return hedge(((edge[0], edge[1][0]), *edge[1][1:]))
         return edge
 
     def _update_atom(self, old: Atom, new: Atom) -> None:
