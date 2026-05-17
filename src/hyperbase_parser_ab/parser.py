@@ -869,15 +869,19 @@ class AlphaBetaParser(Parser):
             "attr",
             "oa",
             "pd",
-            # clausal complement, these are probably going to be nested relations
-            "xcomp",
-            "ccomp",
-            "oc",
             # passive subject (becomes object)
             "nsubjpass",
             "nsubj:pass",
         }:
             return "o"
+        # provisional object
+        elif dep in {
+            # clausal complement, these are probably going to be nested relations
+            "xcomp",
+            "ccomp",
+            "oc",
+        }:
+            return "0"
         elif dep in {
             "iobj",
             "dative",
@@ -1094,6 +1098,14 @@ class AlphaBetaParser(Parser):
             subparts: list[str] = pred.parts()[1].split(".")
             args: list[str] = [self._relation_arg_role(param) for param in edge[1:]]
             args_string: str = "".join(args)
+
+            # resolve provisional objects
+            if "0" in args:
+                if "o" in args:
+                    args_string = args_string.replace("0", "x")
+                else:
+                    args_string = args_string.replace("0", "o")
+
             if len(subparts) > 2:
                 new_part: str = f"{subparts[0]}.{args_string}.{subparts[2]}"
             else:
