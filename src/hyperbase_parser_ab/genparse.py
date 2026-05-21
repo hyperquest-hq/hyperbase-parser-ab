@@ -313,6 +313,40 @@ def _render_text_header(
     )
 
 
+def _render_diagnostics(session: object, parses: list[ParseResult]) -> None:
+    """Per-sentence dependency parse tree and atomizer top-3 panels.
+
+    Reuses the same renderers as the REPL `/set report=on` panels so
+    the user sees the exact same view that report mode produces. Both
+    panels are no-ops when their source data is missing (parse failed
+    before producing a spaCy span / before populating atom traces)."""
+    # Lazy import: genparse and repl live in the same package, and
+    # repl.install() imports genparse to register /genparse. Importing
+    # the renderers at module top level would still work (repl
+    # finishes loading before install() runs), but the lazy import
+    # keeps the dependency direction one-way for any future reader.
+    from hyperbase_parser_ab.repl import _atoms_panel, _build_dependency_tree
+
+    console: Console = session.console  # type: ignore[attr-defined]
+    for p in parses:
+        sent = p.extra.get("spacy_sent")
+        if sent is not None:
+            dep_tree = _build_dependency_tree(sent.root)
+            if dep_tree is not None:
+                console.print()
+                console.print(
+                    Panel(
+                        dep_tree,
+                        title="[bold cyan]Dependency Parse Tree[/bold cyan]",
+                        border_style="cyan",
+                        box=box.ROUNDED,
+                    )
+                )
+        trace = p.extra.get("parse_trace")
+        if isinstance(trace, ParseTrace) and trace.atoms:
+            console.print(_atoms_panel(trace))
+
+
 def _render_parse_panels(session: object, parses: list[ParseResult]) -> None:
     console: Console = session.console  # type: ignore[attr-defined]
     formatter = session.formatter  # type: ignore[attr-defined]
@@ -522,6 +556,7 @@ def _make_genparse_command(
                 except Exception as e:
                     console.print(f"[red]Auto parse crashed:[/red] {e}")
                     auto_parses = []
+                _render_diagnostics(session, auto_parses)
                 _render_parse_panels(session, auto_parses)
 
                 while True:
