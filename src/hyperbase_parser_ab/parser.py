@@ -3504,6 +3504,20 @@ def _worker_init(params: dict[str, Any]) -> None:
     _WORKER_PARSER = AlphaBetaParser(worker_params)
 
 
+def _strip_head_token_cache(edge: Hyperedge) -> None:
+    # The _head_token cache (set in AlphaBetaParser._head_token) stores
+    # spaCy Token objects in each edge's _cache dict. Tokens are views
+    # over the parent Doc and refuse to pickle, so any result edge that
+    # crosses a process boundary has to have those entries stripped
+    # first.
+    cache = edge._cache
+    if cache:
+        cache.pop("_head_token", None)
+    if edge.not_atom:
+        for sub in edge:
+            _strip_head_token_cache(sub)
+
+
 def _worker_parse_chunk(chunk: list[str]) -> list[list[ParseResult]]:
     assert _WORKER_PARSER is not None, "worker parser not initialized"
     results: list[list[ParseResult]] = _WORKER_PARSER._parse_batch_inproc(chunk)
@@ -3513,4 +3527,5 @@ def _worker_parse_chunk(chunk: list[str]) -> list[list[ParseResult]]:
     for sent_results in results:
         for r in sent_results:
             r.extra.pop("spacy_sent", None)
+            _strip_head_token_cache(r.edge)
     return results
