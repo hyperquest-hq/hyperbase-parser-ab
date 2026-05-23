@@ -346,6 +346,11 @@ class AlphaBetaParser(Parser):
         # _cur_trace on and the hill-climb path off, so the user's
         # decision chain is exactly what gets recorded.
         self._manual_pick: ManualPickFn | None = None
+        # Bumped at the start of every parse_spacy_sentence so cached
+        # per-edge derivations (e.g. _head_token) keyed against the
+        # current parse can detect stale entries when the same parser
+        # instance is reused across sentences.
+        self._head_cache_epoch: int = 0
 
     def debug_msg(self, msg: str) -> None:
         if self.debug:
@@ -594,6 +599,7 @@ class AlphaBetaParser(Parser):
         prior_manual_pick: ManualPickFn | None = self._manual_pick
         try:
             self._manual_pick = manual_pick
+            self._head_cache_epoch += 1
             self._cur_trace = (
                 ParseTrace()
                 if (
@@ -901,25 +907,37 @@ class AlphaBetaParser(Parser):
             return "?"
 
     def _head_token(self, edge: Hyperedge) -> Token | None:
-        atoms: list[Atom] = [
-            cast(Atom, uatom)
-            for atom in edge.all_atoms()
-            if (uatom := unique(atom)) is not None and uatom in self.atom2token
-        ]
+        # Cached per-edge: _head_token / _dep_depth depend only on
+        # edge.all_atoms() and parser state (atom2token, orig_atom,
+        # depths). orig_atom / atom2token are append-only within a
+        # parse — _update_atom adds entries for new argroled variants
+        # but never overwrites existing keys — so a cached value for
+        # any given edge stays valid for the whole parse. The
+        # _head_cache_epoch counter is bumped at the start of every
+        # parse_spacy_sentence to invalidate stale entries when the
+        # parser is reused across sentences.
+        cache: dict = edge._cache
+        cached: tuple[int, Token | None] | None = cache.get("_head_token")
+        if cached is not None and cached[0] == self._head_cache_epoch:
+            return cached[1]
         min_depth: int = 9999999
         main_atom: Atom | None = None
-        for atom in atoms:
-            if atom in self.orig_atom:
-                oatom: Atom = self.orig_atom[atom]
-                if oatom in self.depths:
-                    depth: int = self.depths[oatom]
-                    if depth < min_depth:
-                        min_depth = depth
-                        main_atom = atom
-        if main_atom:
-            return self.atom2token[main_atom]
-        else:
-            return None
+        for atom in edge.all_atoms():
+            uatom: Atom = cast(Atom, unique(atom))
+            if uatom not in self.atom2token:
+                continue
+            oatom: Atom | None = self.orig_atom.get(uatom)
+            if oatom is None:
+                continue
+            depth: int | None = self.depths.get(oatom)
+            if depth is not None and depth < min_depth:
+                min_depth = depth
+                main_atom = uatom
+        result: Token | None = (
+            self.atom2token[main_atom] if main_atom is not None else None
+        )
+        cache["_head_token"] = (self._head_cache_epoch, result)
+        return result
 
     def _dep_depth(self, edge: Hyperedge) -> int:
         atoms: list[Atom] = [
@@ -1090,6 +1108,7 @@ class AlphaBetaParser(Parser):
             return edge
 
         new_entity: Hyperedge = edge
+        top_level_changed: bool = False
 
         # Extend predicate connectors with argument types
         if edge.connector_mtype() == "P":
@@ -1110,19 +1129,31 @@ class AlphaBetaParser(Parser):
                 new_part: str = f"{subparts[0]}.{args_string}.{subparts[2]}"
             else:
                 new_part = f"{subparts[0]}.{args_string}"
-            new_pred: Atom = pred.replace_atom_part(1, new_part)
-            unew_pred: Atom = UniqueAtom(new_pred)
-            upred: Atom = UniqueAtom(pred)
-            self.atom2token[unew_pred] = self.atom2token[upred]
-            # Walk to the canonical so repeated argrole rewrites (this
-            # function recurses into sub-edges, and edges built in
-            # earlier reduction iterations may already be argroled) don't
-            # leave a multi-step chain in orig_atom — every key must
-            # map directly to the seed canonical, or the lock-in scan
-            # in _distortion_delta will silently miss every DPT pair
-            # touching that atom.
-            self.orig_atom[unew_pred] = self.orig_atom.get(upred, upred)
-            new_entity = edge.replace_atom(pred, new_pred, unique=True)
+            # Skip the full rebuild when the predicate's argrole part is
+            # already the one we'd produce — repeated _apply_arg_roles
+            # passes on an already-argroled edge are otherwise idempotent
+            # but still allocate a new edge + new atoms each time.
+            if new_part != pred.parts()[1]:
+                new_pred: Atom = pred.replace_atom_part(1, new_part)
+                unew_pred: Atom = UniqueAtom(new_pred)
+                upred: Atom = UniqueAtom(pred)
+                self.atom2token[unew_pred] = self.atom2token[upred]
+                # Walk to the canonical so repeated argrole rewrites (this
+                # function recurses into sub-edges, and edges built in
+                # earlier reduction iterations may already be argroled)
+                # don't leave a multi-step chain in orig_atom — every key
+                # must map directly to the seed canonical, or the lock-in
+                # scan in _distortion_delta will silently miss every DPT
+                # pair touching that atom.
+                self.orig_atom[unew_pred] = self.orig_atom.get(upred, upred)
+                # The predicate atom lives inside edge[0] (the connector),
+                # never in the args. Replacing only the connector avoids
+                # the full-tree walk replace_atom would otherwise do.
+                new_connector: Hyperedge = edge[0].replace_atom(
+                    pred, new_pred, unique=True
+                )
+                new_entity = hedge([new_connector, *edge[1:]])
+                top_level_changed = True
 
         # Extend builder connectors with argument types
         elif edge.connector_mtype() == "B":
@@ -1136,21 +1167,39 @@ class AlphaBetaParser(Parser):
                 else:
                     subparts.append(arg_roles)
                 new_part = ".".join(subparts)
-                new_builder: Atom = builder.replace_atom_part(1, new_part)
-                ubuilder: Atom = UniqueAtom(builder)
-                unew_builder: Atom = UniqueAtom(new_builder)
-                if ubuilder in self.atom2token:
-                    self.atom2token[unew_builder] = self.atom2token[ubuilder]
-                # Walk to the canonical so the chain stays one-deep.
-                self.orig_atom[unew_builder] = self.orig_atom.get(ubuilder, ubuilder)
-                new_entity = edge.replace_atom(builder, new_builder, unique=True)
+                if new_part != builder.parts()[1]:
+                    new_builder: Atom = builder.replace_atom_part(1, new_part)
+                    ubuilder: Atom = UniqueAtom(builder)
+                    unew_builder: Atom = UniqueAtom(new_builder)
+                    if ubuilder in self.atom2token:
+                        self.atom2token[unew_builder] = self.atom2token[ubuilder]
+                    # Walk to the canonical so the chain stays one-deep.
+                    self.orig_atom[unew_builder] = self.orig_atom.get(
+                        ubuilder, ubuilder
+                    )
+                    new_connector = edge[0].replace_atom(
+                        builder, new_builder, unique=True
+                    )
+                    new_entity = hedge([new_connector, *edge[1:]])
+                    top_level_changed = True
 
-        new_subedges: list[Hyperedge] = [
-            self._apply_arg_roles(sub) for sub in new_entity
-        ]
-        new_entity = hedge(new_subedges)
-
-        return new_entity
+        # Recurse into the (possibly rewritten) edge's children. Track
+        # whether any sub actually changed identity so we can skip the
+        # hedge() rebuild when nothing did — the hot path in
+        # _dangling_absorbable hammers this function on already-argroled
+        # edges where every recursive call returns its input unchanged.
+        subs_changed: bool = False
+        new_subedges: list[Hyperedge] = []
+        for sub in new_entity:
+            new_sub: Hyperedge = self._apply_arg_roles(sub)
+            if new_sub is not sub:
+                subs_changed = True
+            new_subedges.append(new_sub)
+        if subs_changed:
+            return hedge(new_subedges)
+        if top_level_changed:
+            return new_entity
+        return edge
 
     def _generate_atom2word(
         self, edge: Hyperedge, offset: int = 0
@@ -3381,12 +3430,20 @@ class AlphaBetaParser(Parser):
     def _fix_argroles(self, edge: Hyperedge) -> Hyperedge:
         if edge.atom:
             return edge
-        new_edge: Hyperedge = hedge([self._fix_argroles(subedge) for subedge in edge])
-        if new_edge is None:
-            return edge
-        edge = new_edge
+        subs_changed: bool = False
+        new_subedges: list[Hyperedge] = []
+        for subedge in edge:
+            new_sub: Hyperedge = self._fix_argroles(subedge)
+            if new_sub is not subedge:
+                subs_changed = True
+            new_subedges.append(new_sub)
+        if subs_changed:
+            new_edge: Hyperedge | None = hedge(new_subedges)
+            if new_edge is None:
+                return edge
+            edge = new_edge
         ars: str = edge.argroles()
-        if ars != "" and edge.mt == "R":
+        if ars != "" and edge.mt == "R" and "?" in ars:
             _ars: str = ""
             for ar, subedge in zip(ars, edge[1:], strict=True):
                 _ar: str = ar
@@ -3399,7 +3456,8 @@ class AlphaBetaParser(Parser):
                         elif "o" not in ars:
                             _ar = "o"
                 _ars += _ar
-            return self._replace_argroles(edge, _ars)
+            if _ars != ars:
+                return self._replace_argroles(edge, _ars)
         return edge
 
     def _flatten_conjunctions(self, edge: Hyperedge) -> Hyperedge:
