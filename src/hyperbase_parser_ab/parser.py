@@ -1,6 +1,7 @@
 import itertools
 import multiprocessing as mp
 import re
+import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -36,6 +37,13 @@ from hyperbase_parser_ab.trace import (
     SubstitutionTrial,
     rule_repr,
 )
+
+
+class _ParseTimeoutError(Exception):
+    """Raised inside the reduction search when a sentence has exceeded
+    its wall-clock budget. Caught at the parse_spacy_sentence boundary
+    so the sentence is reported as a parse failure and the batch keeps
+    making progress instead of hanging forever on a pathological input."""
 
 
 def _concept_type_and_subtype(token: Token) -> str:
@@ -229,6 +237,21 @@ class AlphaBetaParser(Parser):
                 "required": False,
                 "reload": False,
             },
+            "max_parse_time": {
+                "type": float,
+                "default": 30.0,
+                "description": (
+                    "Wall-clock budget per sub-sentence parse, in "
+                    "seconds. When the reduction search exceeds this, "
+                    "the sentence is abandoned and reported as a "
+                    "parse failure so the batch keeps making progress "
+                    "instead of stalling on a pathological input. "
+                    "Set to 0 to disable (uncapped runtime — restores "
+                    "pre-timeout behavior)."
+                ),
+                "required": False,
+                "reload": False,
+            },
         }
 
     def apply_live_setting(self, name: str, value: Any) -> None:  # noqa: ANN401
@@ -351,6 +374,12 @@ class AlphaBetaParser(Parser):
         # current parse can detect stale entries when the same parser
         # instance is reused across sentences.
         self._head_cache_epoch: int = 0
+        # Wall-clock deadline (time.monotonic()) for the current
+        # parse_spacy_sentence call; None means uncapped. Checked in
+        # the hot inner loop of _dangling_absorbable so a pathological
+        # search bails out at finer granularity than per-iteration.
+        self.max_parse_time: float = float(self.params.get("max_parse_time", 30.0))
+        self._parse_deadline: float | None = None
 
     def debug_msg(self, msg: str) -> None:
         if self.debug:
@@ -597,9 +626,15 @@ class AlphaBetaParser(Parser):
         force_trace: bool = False,
     ) -> ParseResult | None:
         prior_manual_pick: ManualPickFn | None = self._manual_pick
+        prior_deadline: float | None = self._parse_deadline
         try:
             self._manual_pick = manual_pick
             self._head_cache_epoch += 1
+            self._parse_deadline = (
+                time.monotonic() + self.max_parse_time
+                if self.max_parse_time > 0
+                else None
+            )
             self._cur_trace = (
                 ParseTrace()
                 if (
@@ -812,6 +847,12 @@ class AlphaBetaParser(Parser):
                 failed=failed,
                 extra=extra,
             )
+        except _ParseTimeoutError:
+            print(
+                f"Parse timeout ({self.max_parse_time:.1f}s) exceeded; "
+                f'skipping sentence: "{sent!s}"'
+            )
+            return None
         except Exception as e:
             print(f'Caught exception: {e!s} while parsing: "{sent!s}"')
             traceback.print_exc()
@@ -821,6 +862,7 @@ class AlphaBetaParser(Parser):
             # crashes mid-sentence can't leak its callback into a later
             # automatic parse from the same parser instance.
             self._manual_pick = prior_manual_pick
+            self._parse_deadline = prior_deadline
 
     def _has_flat_name(self, edge: Hyperedge) -> bool:
         for atom in edge.all_atoms():
@@ -2310,6 +2352,13 @@ class AlphaBetaParser(Parser):
         mtype_at: list[str] = [virtual[i].mtype() for i in range(len(virtual))]
         t_new: str = mtype_at[new_edge_v]
         t_x: str = mtype_at[x_v]
+        # Cheap deadline check once per call. The hot path bottoms out
+        # here on pathological sentences, so this is the natural place
+        # to bail out — finer than per-_expand_state-iteration and far
+        # cheaper than checking inside the per-combo loop.
+        deadline: float | None = self._parse_deadline
+        if deadline is not None and time.monotonic() > deadline:
+            raise _ParseTimeoutError()
         # Try small rules first so easy absorptions short-circuit before
         # we enumerate combinatorial extras for the larger P/B rules.
         for rule in sorted(RULES, key=lambda r: r.size):
