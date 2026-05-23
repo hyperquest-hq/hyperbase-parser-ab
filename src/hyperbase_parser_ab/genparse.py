@@ -240,7 +240,9 @@ def _render_candidates_table(cands: list[ManualCandidate], default_idx: int) -> 
     return table
 
 
-def _make_manual_picker(session: object) -> Callable[[list[ManualCandidate], int], int]:
+def _make_manual_picker(
+    session: object, text: str
+) -> Callable[[list[ManualCandidate], int], int]:
     """Returns the ManualPickFn used by parse_sentence in manual mode.
 
     Raises ``_GenparseAbortError`` to unwind the parse when the user wants to
@@ -257,6 +259,14 @@ def _make_manual_picker(session: object) -> Callable[[list[ManualCandidate], int
         console.print()
         console.print(
             Panel(
+                Text(text, style="italic"),
+                title="[bold yellow]Sentence[/bold yellow]",
+                border_style="yellow",
+                box=box.ROUNDED,
+            )
+        )
+        console.print(
+            Panel(
                 _render_candidates_table(cands, default_idx),
                 title=(
                     f"[bold magenta]Decision #{step}[/bold magenta] "
@@ -269,12 +279,14 @@ def _make_manual_picker(session: object) -> Callable[[list[ManualCandidate], int
         while True:
             try:
                 ans = prompt_session.prompt(
-                    f"pick [0..{len(cands) - 1}] (Enter={default_idx}) > "
+                    f"pick [0..{len(cands) - 1}] (Enter={default_idx}, q=abort) > "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
                 raise _GenparseAbortError() from None
             if ans == "":
                 return default_idx
+            if ans.lower() in ("q", "quit", "abort"):
+                raise _GenparseAbortError()
             try:
                 idx = int(ans)
             except ValueError:
@@ -588,7 +600,7 @@ def _make_genparse_command(
                         break
 
                     if ans in ("m", "manual"):
-                        picker = _make_manual_picker(session)
+                        picker = _make_manual_picker(session, text)
                         try:
                             manual_parses = parser.parse_sentence(
                                 text, manual_pick=picker
