@@ -2360,6 +2360,84 @@ class AlphaBetaParser(Parser):
                 result = apply_rule_indices(rule, virtual, indices, self.atom2token)
                 if result is None:
                     continue
+                # Top-level argrole feasibility pre-check. For a P-rule
+                # result, _apply_arg_roles assigns one role per arg via
+                # _relation_arg_role and then _fix_argroles resolves
+                # any provisional "0" / "?" markers. If the resulting
+                # argroles string would carry a duplicate 's' / 'o' /
+                # 'a' / 'm' (→ "argrole-X-1-max") or an unresolved '?'
+                # (→ "bad-argrole"), the post-argroles
+                # _candidate_badness call would reject the candidate
+                # — catching it on the raw edge skips the expensive
+                # _apply_arg_roles + _fix_argroles +
+                # check_correctness pass. Sub-edge argroles were
+                # locked in by prior _expand_state iterations, so only
+                # the top-level P-connector's args need checking.
+                if not result.atom and result[0].mtype() == "P":
+                    roles: list[str] = [
+                        self._relation_arg_role(arg) for arg in result[1:]
+                    ]
+                    has_zero: bool = "0" in roles
+                    has_o: bool = "o" in roles
+                    has_s: bool = "s" in roles
+                    has_q: bool = "?" in roles
+                    s_count: int = roles.count("s")
+                    o_count: int = roles.count("o")
+                    if (
+                        s_count > 1
+                        or o_count > 1
+                        or roles.count("a") > 1
+                        or roles.count("m") > 1
+                    ):
+                        continue
+                    if has_zero and not has_o and roles.count("0") > 1:
+                        # All "0" args promote to "o" (no existing "o"),
+                        # so >1 of them collides on the "o" role.
+                        continue
+                    if has_q:
+                        # Mirror _fix_argroles: it scans the original
+                        # post-_apply_arg_roles argroles snapshot and,
+                        # for every "?" arg, promotes it based on the
+                        # arg's mtype using the *snapshot* (not the
+                        # being-built result). So every "?" arg with a
+                        # given mtype lands on the same slot — they do
+                        # NOT take turns. R/S args go to "x"; C args go
+                        # to "s" iff "s" wasn't in the snapshot, else
+                        # "o" iff "o" wasn't, else stay "?" →
+                        # bad-argrole. Anything other than R/S/C also
+                        # stays "?".
+                        s_in: bool = has_s
+                        o_in: bool = has_o or (has_zero and not has_o)
+                        c_qs: int = 0
+                        bad: bool = False
+                        for ar, arg in zip(roles, result[1:], strict=True):
+                            if ar != "?":
+                                continue
+                            mt: str = arg.mt
+                            if mt in {"R", "S"}:
+                                continue
+                            if mt != "C":
+                                bad = True
+                                break
+                            c_qs += 1
+                        if bad:
+                            continue
+                        if c_qs > 0:
+                            if not s_in:
+                                # Every "?" C-arg becomes "s" → c_qs > 1
+                                # collides on the "s" slot.
+                                if c_qs > 1:
+                                    continue
+                            elif not o_in:
+                                # Every "?" C-arg becomes "o" → c_qs > 1
+                                # collides.
+                                if c_qs > 1:
+                                    continue
+                            else:
+                                # Both "s" and "o" already in snapshot
+                                # — "?" stays unresolved → bad-argrole
+                                # for any C-arg "?".
+                                continue
                 argroled = unique(
                     self._fix_argroles(self._apply_arg_roles(non_unique(result)))
                 )
