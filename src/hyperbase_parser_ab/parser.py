@@ -2259,38 +2259,54 @@ class AlphaBetaParser(Parser):
         # per combo and avoids the ~2µs apply_rule_indices function-call
         # overhead on the ~98% of combos that are type-incompatible.
         mtype_at: list[str] = [virtual[i].mtype() for i in range(len(virtual))]
+        t_new: str = mtype_at[new_edge_v]
+        t_x: str = mtype_at[x_v]
         # Try small rules first so easy absorptions short-circuit before
         # we enumerate combinatorial extras for the larger P/B rules.
         for rule in sorted(RULES, key=lambda r: r.size):
             need_extra: int = rule.size - 2
-            if need_extra < 0 or need_extra > len(others):
+            if need_extra < 0:
                 continue
             first_type: str = rule.first_type
             arg_types: set[str] = rule.arg_types
+            allowed: set[str] = arg_types | {first_type}
+            # Both fixed slots must already be type-compatible.
+            if t_new not in allowed or t_x not in allowed:
+                continue
+            # Restrict the combinatorial search to type-compatible
+            # positions only. On long sentences this collapses
+            # C(N, need_extra) into C(M, need_extra) with M << N, which
+            # was the actual quadratic-ish blow-up in profiling.
+            filtered: list[int] = [o for o in others if mtype_at[o] in allowed]
+            if need_extra > len(filtered):
+                continue
+            # If neither fixed slot already carries first_type, at least
+            # one position in `filtered` must, or no combo can satisfy
+            # the rule's pivot constraint.
+            fixed_has_first: bool = t_new == first_type or t_x == first_type
+            if not fixed_has_first and not any(
+                mtype_at[o] == first_type for o in filtered
+            ):
+                continue
             combos: Any
             if need_extra == 0:
                 combos = ((),)
             else:
-                combos = itertools.combinations(others, need_extra)
+                combos = itertools.combinations(filtered, need_extra)
             for extras in combos:
-                indices: list[int] = sorted({new_edge_v, x_v, *extras})
-                if len(indices) != rule.size:
-                    continue
+                # filtered preserves the ascending order of `others`, and
+                # itertools.combinations emits combos in that order, so
+                # `extras` is already sorted. `new_edge_v` and `x_v` are
+                # not in `others`, hence not in `extras` — no dedup
+                # needed. Cheap merge into ascending order.
+                indices: list[int] = sorted((new_edge_v, x_v, *extras))
                 # Type prefilter (sound under-approximation of
-                # apply_rule_indices' pivot scan): at least one position
-                # must carry rule.first_type, and every position's mtype
-                # must belong to first_type or arg_types. False positives
-                # are harmless — the call below still does the full check.
-                has_first: bool = False
-                all_ok: bool = True
-                for i in indices:
-                    t: str = mtype_at[i]
-                    if t == first_type:
-                        has_first = True
-                    elif t not in arg_types:
-                        all_ok = False
-                        break
-                if not (has_first and all_ok):
+                # apply_rule_indices' pivot scan): every position is
+                # already in `allowed` by construction; we only need to
+                # confirm at least one carries first_type.
+                if not fixed_has_first and not any(
+                    mtype_at[e] == first_type for e in extras
+                ):
                     continue
                 result = apply_rule_indices(rule, virtual, indices, self.atom2token)
                 if result is None:
@@ -2616,14 +2632,27 @@ class AlphaBetaParser(Parser):
                             extra += 1
             return extra
 
+        # (node, budget) -> list of connected subtrees. Memoized within
+        # this _expand_state call: children_of is fixed for the call, so
+        # the recursion is purely a function of (node, budget). Without
+        # the cache, deep nodes are recomputed once per ancestor and
+        # high-branching nodes (e.g. a verb heading enumerated clauses)
+        # drive _expand_state from milliseconds into seconds.
+        subtree_memo: dict[tuple[int, int], list[frozenset[int]]] = {}
+
         def _subtrees_rooted_at(node: int, budget: int) -> list[frozenset[int]]:
             # All connected subtrees rooted at `node` with size in [1, budget].
             # The DP processes children one at a time; each child either
             # contributes nothing or one of its rooted subtrees, so the
             # children's contributions are disjoint and there are no
             # duplicates.
+            key: tuple[int, int] = (node, budget)
+            cached: list[frozenset[int]] | None = subtree_memo.get(key)
+            if cached is not None:
+                return cached
             base: list[frozenset[int]] = [frozenset({node})]
             if budget <= 1:
+                subtree_memo[key] = base
                 return base
             states: list[tuple[int, frozenset[int]]] = [(0, frozenset())]
             for child in children_of[node]:
@@ -2641,7 +2670,13 @@ class AlphaBetaParser(Parser):
             for _size_extra, pos_extra in states:
                 if pos_extra:
                     base.append(frozenset({node}) | pos_extra)
+            subtree_memo[key] = base
             return base
+
+        # Cache per-position mtype once. Cheap because Hyperedge.mtype()
+        # is memoised on the edge, and downstream type prefilters re-read
+        # this many times per parent_pos.
+        seq_mtype: list[str] = [e.mtype() for e in state.sequence]
 
         for parent_pos in range(len(state.sequence)):
             by_size: dict[int, list[frozenset[int]]] = {}
@@ -2651,7 +2686,28 @@ class AlphaBetaParser(Parser):
             if not by_size:
                 continue
             for rule_number, rule in enumerate(RULES):
+                first_type: str = rule.first_type
+                allowed_types: set[str] = rule.arg_types | {first_type}
                 for st in by_size.get(rule.size, []):
+                    # Type prefilter (sound under-approximation of
+                    # apply_rule_indices' pivot scan): every position's
+                    # mtype must be in {first_type} U arg_types, and at
+                    # least one must equal first_type. Mirrors the
+                    # _dangling_absorbable check — pruning here avoids
+                    # the apply_rule + _apply_arg_roles + scoring
+                    # pipeline for candidates that can't satisfy any
+                    # pivot assignment.
+                    has_first: bool = False
+                    all_ok: bool = True
+                    for pos_idx in st:
+                        t: str = seq_mtype[pos_idx]
+                        if t == first_type:
+                            has_first = True
+                        elif t not in allowed_types:
+                            all_ok = False
+                            break
+                    if not (has_first and all_ok):
+                        continue
                     indices: tuple[int, ...] = tuple(sorted(st))
                     _try_candidate(rule_number, rule, indices, parent_pos)
 
