@@ -239,7 +239,7 @@ class AlphaBetaParser(Parser):
             },
             "max_parse_time": {
                 "type": float,
-                "default": 30.0,
+                "default": 10.0,
                 "description": (
                     "Wall-clock budget per sub-sentence parse, in "
                     "seconds. When the reduction search exceeds this, "
@@ -378,7 +378,7 @@ class AlphaBetaParser(Parser):
         # parse_spacy_sentence call; None means uncapped. Checked in
         # the hot inner loop of _dangling_absorbable so a pathological
         # search bails out at finer granularity than per-iteration.
-        self.max_parse_time: float = float(self.params.get("max_parse_time", 30.0))
+        self.max_parse_time: float = float(self.params.get("max_parse_time", 10.0))
         self._parse_deadline: float | None = None
 
     def debug_msg(self, msg: str) -> None:
@@ -595,12 +595,33 @@ class AlphaBetaParser(Parser):
         chunks: list[list[str]] = [
             sentences[i : i + chunk_size] for i in range(0, n, chunk_size)
         ]
-        chunk_results: list[list[list[ParseResult]]] = list(
-            pool.map(_worker_parse_chunk, chunks)
+        # Per-chunk wall-clock budget. The in-worker per-sentence
+        # timeout (max_parse_time) already caps each sub-sentence, so a
+        # chunk of K sentences should never exceed K * max_parse_time
+        # plus a small constant for spaCy / atomizer overhead. We add a
+        # generous safety factor in case a worker hangs at the OS level
+        # (e.g. native-extension deadlock) so the whole batch doesn't
+        # block forever — if a chunk blows past the budget we treat
+        # its sentences as parse failures and keep going.
+        per_chunk_budget: float = max(
+            60.0, chunk_size * max(self.max_parse_time, 1.0) * 2.0 + 30.0
         )
-        # Flatten back in submission order.
+        futures = [pool.submit(_worker_parse_chunk, chunk) for chunk in chunks]
         out: list[list[ParseResult]] = []
-        for cr in chunk_results:
+        for fut, chunk in zip(futures, chunks, strict=True):
+            try:
+                cr = fut.result(timeout=per_chunk_budget)
+            except Exception as e:
+                print(
+                    f"Worker chunk failed ({type(e).__name__}: {e}); "
+                    f"dropping {len(chunk)} sentences and continuing."
+                )
+                cr = [[] for _ in chunk]
+                # Hard-cancel so a hung worker doesn't keep consuming
+                # CPU in the background. The pool itself stays alive
+                # for subsequent batches; ProcessPoolExecutor will
+                # respawn the worker on demand.
+                fut.cancel()
             out.extend(cr)
         return out
 
@@ -2582,6 +2603,14 @@ class AlphaBetaParser(Parser):
         # rule applies, a `:/J/.` force-join fallback is produced with
         # `failed=True` so the caller's reduction loop still terminates.
         # Returns None only on an unrecoverable internal error.
+        # Deadline check at the outer reduction layer. Candidate
+        # generation (subtree enumeration, scoring, dominance) can be
+        # combinatorially expensive on pathological sentences and never
+        # reaches the finer-grained check inside _dangling_absorbable;
+        # checking here ensures the timeout fires even when the
+        # bottleneck is upstream of get_no_dangling().
+        if self._parse_deadline is not None and time.monotonic() > self._parse_deadline:
+            raise _ParseTimeoutError()
         self._cur_sequence = state.sequence
         base_iter: RuleIteration = RuleIteration(
             iteration=len(state.iterations),
@@ -2854,7 +2883,10 @@ class AlphaBetaParser(Parser):
         # this many times per parent_pos.
         seq_mtype: list[str] = [e.mtype() for e in state.sequence]
 
+        parse_deadline: float | None = self._parse_deadline
         for parent_pos in range(len(state.sequence)):
+            if parse_deadline is not None and time.monotonic() > parse_deadline:
+                raise _ParseTimeoutError()
             by_size: dict[int, list[frozenset[int]]] = {}
             for st in _subtrees_rooted_at(parent_pos, max_rule_size):
                 if len(st) >= 2:
