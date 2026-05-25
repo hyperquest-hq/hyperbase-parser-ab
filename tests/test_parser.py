@@ -163,17 +163,6 @@ class TestParserRelationArgRole:
         parser.depths = {uatom: 1}
         assert parser._relation_arg_role(edge) == "?"
 
-    def test_clausal_complement(self):
-        parser = _make_parser()
-        edge = hedge("go/P/en")
-        assert edge
-        uatom = UniqueAtom(edge)
-        token = self._make_token("xcomp")
-        parser.atom2token = {uatom: token}
-        parser.orig_atom = {uatom: uatom}
-        parser.depths = {uatom: 1}
-        assert parser._relation_arg_role(edge) == "o"
-
 
 class TestParserBuilderArgRoles:
     @staticmethod

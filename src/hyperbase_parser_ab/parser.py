@@ -362,6 +362,11 @@ class AlphaBetaParser(Parser):
         self._repl_session: Any = None
         self._cur_trace: ParseTrace | None = None
         self._cur_sequence: list[Hyperedge] | None = None
+        # Companion to _cur_sequence: live token -> sequence position
+        # map for the current _expand_state call. Built once in
+        # _expand_state and read by _no_dangling_branches to avoid
+        # rebuilding the map on every dominance-filter probe.
+        self._cur_tok2pos: dict[Token, int] | None = None
         # Set by parse_sentence/parse_spacy_sentence for the duration of
         # a single parse. When non-None, _expand_state defers the
         # winner pick to this callback instead of taking the automatic
@@ -1732,6 +1737,19 @@ class AlphaBetaParser(Parser):
         # enclosing edges to identify the "anchor" of `edge` for
         # parent-child purposes. Modifiers, special transparents, and
         # builders all delegate the head downward per the rules.
+        # Edge-cache keyed by _head_cache_epoch so stale entries are
+        # ignored when the parser is reused for a new sentence
+        # (orig_atom is rebuilt per parse). Pure function of
+        # (edge, self.orig_atom) within a single sentence.
+        cache: dict = edge._cache
+        cached: tuple[int, set[UniqueAtom]] | None = cache.get("_sh_head")
+        if cached is not None and cached[0] == self._head_cache_epoch:
+            return cached[1]
+        result: set[UniqueAtom] = self._sh_head_atoms_compute(edge)
+        cache["_sh_head"] = (self._head_cache_epoch, result)
+        return result
+
+    def _sh_head_atoms_compute(self, edge: Hyperedge) -> set[UniqueAtom]:
         if edge.atom:
             ua = self.orig_atom.get(cast(Atom, edge))
             return {ua} if ua is not None else set()
@@ -1800,6 +1818,32 @@ class AlphaBetaParser(Parser):
         # Recursion into the connector chain is included so modifier
         # chain edges are captured here, but recursion into the args is
         # not — those are charged when their own subtrees were built.
+        # Edge-cache keyed by _head_cache_epoch (same invariant as
+        # _sh_head_atoms — pure function of (edge, self.orig_atom)
+        # within a sentence).
+        cache: dict = edge._cache
+        cached: (
+            tuple[
+                int,
+                tuple[
+                    set[frozenset[UniqueAtom]],
+                    set[tuple[UniqueAtom, UniqueAtom]],
+                ],
+            ]
+            | None
+        ) = cache.get("_sh_local")
+        if cached is not None and cached[0] == self._head_cache_epoch:
+            return cached[1]
+        result = self._sh_local_pairs_compute(edge)
+        cache["_sh_local"] = (self._head_cache_epoch, result)
+        return result
+
+    def _sh_local_pairs_compute(
+        self, edge: Hyperedge
+    ) -> tuple[
+        set[frozenset[UniqueAtom]],
+        set[tuple[UniqueAtom, UniqueAtom]],
+    ]:
         undirected: set[frozenset[UniqueAtom]] = set()
         directional: set[tuple[UniqueAtom, UniqueAtom]] = set()
         if edge.atom:
@@ -1915,6 +1959,11 @@ class AlphaBetaParser(Parser):
         # used in _no_dangling_branches, but applied to a hyperedge
         # subtree. Used by the relaxed parent/child satisfaction check in
         # _distortion_delta to broaden what counts as a slot's head.
+        # Edge-cache keyed by _head_cache_epoch.
+        cache: dict = edge._cache
+        cached: tuple[int, set[UniqueAtom]] | None = cache.get("_dep_shallow")
+        if cached is not None and cached[0] == self._head_cache_epoch:
+            return cached[1]
         ua_by_token: dict[Token, UniqueAtom] = {}
         for a in edge.all_atoms():
             ua: UniqueAtom | None = self.orig_atom.get(a)
@@ -1928,6 +1977,7 @@ class AlphaBetaParser(Parser):
         for tok, ua in ua_by_token.items():
             if tok.head == tok or tok.head not in tokens:
                 result.add(ua)
+        cache["_dep_shallow"] = (self._head_cache_epoch, result)
         return result
 
     def _j_3_7_1_satisfied(
@@ -2301,12 +2351,17 @@ class AlphaBetaParser(Parser):
         if not cand_tokens:
             return True
 
-        tok2pos: dict[Token, int] = {}
-        for pos, edge in enumerate(cur_seq):
-            for atom in edge.all_atoms():
-                tok = self.atom2token.get(atom)
-                if tok is not None:
-                    tok2pos[tok] = pos
+        # Reuse the per-_expand_state map (built once at the top of
+        # _expand_state). Fallback rebuilds defensively so the function
+        # remains correct if called outside that path.
+        tok2pos: dict[Token, int] | None = self._cur_tok2pos
+        if tok2pos is None:
+            tok2pos = {}
+            for pos, edge in enumerate(cur_seq):
+                for atom in edge.all_atoms():
+                    tok = self.atom2token.get(atom)
+                    if tok is not None:
+                        tok2pos[tok] = pos
 
         cand_positions: set[int] = {
             pos for pos, edge in enumerate(cur_seq) if any(edge is w for w in window)
@@ -2646,13 +2701,17 @@ class AlphaBetaParser(Parser):
         # a freshly-stranded one. None for non-SW candidates.
         cand_sw_priority: list[int | None] = []
 
-        # token -> sequence index of the live hyperedge containing that token
+        # token -> sequence index of the live hyperedge containing that token.
+        # Also stashed on self for re-use by _no_dangling_branches, which is
+        # called many times per _expand_state via the dominance filter and
+        # would otherwise rebuild this map on every call.
         tok2pos: dict[Token, int] = {}
         for pos, edge in enumerate(state.sequence):
             for atom in edge.all_atoms():
                 tok = self.atom2token.get(atom)
                 if tok is not None:
                     tok2pos[tok] = pos
+        self._cur_tok2pos = tok2pos
 
         def _live_dep_children(pos: int) -> set[int]:
             # Live child-hyperedge positions: every dep-child of any token
@@ -2843,38 +2902,47 @@ class AlphaBetaParser(Parser):
         # the cache, deep nodes are recomputed once per ancestor and
         # high-branching nodes (e.g. a verb heading enumerated clauses)
         # drive _expand_state from milliseconds into seconds.
-        subtree_memo: dict[tuple[int, int], list[frozenset[int]]] = {}
+        # Internal representation: sorted tuple[int, ...]. Sorted by
+        # construction because children_of[node] is sorted and each
+        # child's recursive result is also sorted (children's
+        # contributions are disjoint and appear in ascending position
+        # order). Tuples are ~3x cheaper than frozensets to construct
+        # and hash, which dominates the cost of this DP.
+        subtree_memo: dict[tuple[int, int], list[tuple[int, ...]]] = {}
 
-        def _subtrees_rooted_at(node: int, budget: int) -> list[frozenset[int]]:
+        def _subtrees_rooted_at(node: int, budget: int) -> list[tuple[int, ...]]:
             # All connected subtrees rooted at `node` with size in [1, budget].
             # The DP processes children one at a time; each child either
             # contributes nothing or one of its rooted subtrees, so the
             # children's contributions are disjoint and there are no
             # duplicates.
             key: tuple[int, int] = (node, budget)
-            cached: list[frozenset[int]] | None = subtree_memo.get(key)
+            cached = subtree_memo.get(key)
             if cached is not None:
                 return cached
-            base: list[frozenset[int]] = [frozenset({node})]
+            base: list[tuple[int, ...]] = [(node,)]
             if budget <= 1:
                 subtree_memo[key] = base
                 return base
-            states: list[tuple[int, frozenset[int]]] = [(0, frozenset())]
+            states: list[tuple[int, ...]] = [()]
             for child in children_of[node]:
-                new_states: list[tuple[int, frozenset[int]]] = []
-                for size_so_far, pos_so_far in states:
-                    new_states.append((size_so_far, pos_so_far))  # skip
-                    remaining: int = budget - 1 - size_so_far
+                new_states: list[tuple[int, ...]] = []
+                for pos_so_far in states:
+                    new_states.append(pos_so_far)  # skip
+                    remaining: int = budget - 1 - len(pos_so_far)
                     if remaining <= 0:
                         continue
                     for sub in _subtrees_rooted_at(child, remaining):
-                        new_size: int = size_so_far + len(sub)
-                        if new_size <= budget - 1:
-                            new_states.append((new_size, pos_so_far | sub))
+                        if len(pos_so_far) + len(sub) <= budget - 1:
+                            new_states.append(pos_so_far + sub)
                 states = new_states
-            for _size_extra, pos_extra in states:
+            for pos_extra in states:
                 if pos_extra:
-                    base.append(frozenset({node}) | pos_extra)
+                    # Concatenate then sort; pos_extra was built by
+                    # appending child subtrees in children_of order, but
+                    # child subtrees may include their own descendants at
+                    # arbitrary positions, so explicit sort is needed.
+                    base.append(tuple(sorted((node, *pos_extra))))
             subtree_memo[key] = base
             return base
 
@@ -2887,7 +2955,7 @@ class AlphaBetaParser(Parser):
         for parent_pos in range(len(state.sequence)):
             if parse_deadline is not None and time.monotonic() > parse_deadline:
                 raise _ParseTimeoutError()
-            by_size: dict[int, list[frozenset[int]]] = {}
+            by_size: dict[int, list[tuple[int, ...]]] = {}
             for st in _subtrees_rooted_at(parent_pos, max_rule_size):
                 if len(st) >= 2:
                     by_size.setdefault(len(st), []).append(st)
@@ -2916,8 +2984,9 @@ class AlphaBetaParser(Parser):
                             break
                     if not (has_first and all_ok):
                         continue
-                    indices: tuple[int, ...] = tuple(sorted(st))
-                    _try_candidate(rule_number, rule, indices, parent_pos)
+                    # `st` is already a sorted tuple of positions; no
+                    # need to re-sort.
+                    _try_candidate(rule_number, rule, st, parent_pos)
 
         # Sibling-modifier-on-predicate exception. For each (m_pos,
         # p_pos) pair collected above, fire size-2 M rules only.
