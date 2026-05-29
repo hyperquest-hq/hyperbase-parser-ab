@@ -363,24 +363,14 @@ def _render_report(console: Console, trace: ParseTrace) -> None:
 def install(parser: AlphaBetaParser, session: object) -> None:
     """Register AlphaBeta-specific REPL behavior on *session*.
 
-    Only ``report`` is registered here. ``post_processing`` is already
-    in ``accepted_params``, which means the REPL exposes it to ``/set``
-    and ``/settings`` automatically. Registering it again as a plugin
-    setting would put it in ``_extra_settings``, and the REPL's
-    ``_reset_plugin_state`` (run before each parser rebuild) pops
-    everything in ``_extra_settings`` from the live settings dict — so
-    the user's ``/set`` value would be wiped before
-    ``_build_parser_kwargs`` could read it back into the new parser
-    instance.
+    The detailed parse trace is rendered through the core ``diagnostics``
+    REPL feature (built-in setting + ``register_diagnostics_provider``),
+    so it is not registered as a plugin setting here. ``post_processing``
+    is already in ``accepted_params``, which means the REPL exposes it to
+    ``/set`` and ``/settings`` automatically.
     """
-    session.register_setting(  # type: ignore[attr-defined]
-        "report",
-        default=False,
-        type_=bool,
-        description="Show detailed parse trace (atoms, rules, transformations).",
-    )
     session.register_pre_result_hook(_make_pre_result_hook(parser))  # type: ignore[attr-defined]
-    session.register_pre_result_hook(_make_report_hook(parser))  # type: ignore[attr-defined]
+    session.register_diagnostics_provider(_make_report_hook(parser))  # type: ignore[attr-defined]
     session.register_command(  # type: ignore[attr-defined]
         "sub",
         "Re-parse last sentence with substitutions from trial #N (see /sub <N>).",
@@ -390,6 +380,11 @@ def install(parser: AlphaBetaParser, session: object) -> None:
         "dpt",
         "Re-parse last sentence and dump per-edge distortion analysis.",
         _make_dpt_command(parser, session),
+    )
+    session.register_command(  # type: ignore[attr-defined]
+        "deptree",
+        "Show spaCy dependency parse tree of the last parsed sentence.",
+        _make_deptree_command(parser, session),
     )
     from hyperbase_parser_ab.genparse import _make_genparse_command
 
@@ -448,7 +443,7 @@ def _make_sub_command(
         if not results:
             console.print("[yellow]No parse produced.[/yellow]")
             return False
-        report_on: bool = bool(session.settings.get("report", False))  # type: ignore[attr-defined]
+        report_on: bool = bool(session.settings.get("diagnostics", False))  # type: ignore[attr-defined]
         for r in results:
             console.print(str(r.edge))
             if report_on:
@@ -496,3 +491,31 @@ def _make_dpt_command(
         return False
 
     return cmd_dpt
+
+
+def _make_deptree_command(
+    parser: AlphaBetaParser, session: object
+) -> callable[[list[str]], bool]:
+    def cmd_deptree(args: list[str]) -> bool:
+        del args
+        console: Console = session.console  # type: ignore[attr-defined]
+        doc = parser.doc
+        if doc is None:
+            console.print("[yellow]No cached parse. Parse a sentence first.[/yellow]")
+            return False
+        console.print()
+        for sent in doc.sents:
+            dep_tree = _build_dependency_tree(sent.root)
+            if dep_tree is None:
+                continue
+            console.print(
+                Panel(
+                    dep_tree,
+                    title="[bold cyan]Dependency Parse Tree[/bold cyan]",
+                    border_style="cyan",
+                    box=box.ROUNDED,
+                )
+            )
+        return False
+
+    return cmd_deptree

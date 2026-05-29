@@ -392,7 +392,7 @@ class AlphaBetaParser(Parser):
 
     def _report_enabled(self) -> bool:
         sess: Any = self._repl_session
-        return bool(sess and sess.settings.get("report", False))
+        return bool(sess and sess.settings.get("diagnostics", False))
 
     def _post_processing_enabled(self) -> bool:
         sess: Any = self._repl_session
@@ -902,12 +902,12 @@ class AlphaBetaParser(Parser):
         return False
 
     def _builder_arg_roles(self, edge: Hyperedge) -> str:
-        flat1: bool = self._has_flat_name(edge[1])
-        flat2: bool = self._has_flat_name(edge[2])
-        if flat1 and not flat2:
-            return "ma"
-        if flat2 and not flat1:
-            return "am"
+        # flat1: bool = self._has_flat_name(edge[1])
+        # flat2: bool = self._has_flat_name(edge[2])
+        # if flat1 and not flat2:
+        #     return "ma"
+        # if flat2 and not flat1:
+        #     return "am"
         depth1: int = self._dep_depth(edge[1])
         depth2: int = self._dep_depth(edge[2])
         if depth1 > depth2:
