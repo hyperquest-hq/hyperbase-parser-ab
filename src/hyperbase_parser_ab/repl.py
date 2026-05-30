@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hyperbase.parsers.repl_api import PreResultHook, ReplContext
+from hyperbase.parsers.repl import PreResultHook, ReplContext
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel

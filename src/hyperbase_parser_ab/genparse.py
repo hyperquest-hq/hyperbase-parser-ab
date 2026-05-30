@@ -52,7 +52,7 @@ from hyperbase_parser_ab.trace import (
 )
 
 if TYPE_CHECKING:
-    from hyperbase.parsers.parse_result import ParseResult
+    from hyperbase.parsers.result import ParseResult
 
     from hyperbase_parser_ab.parser import AlphaBetaParser
 

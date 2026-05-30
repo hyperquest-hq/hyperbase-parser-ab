@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import spacy
 from hyperbase.builders import build_atom, hedge
+from hyperbase.correctness import check_structural_quality
 from hyperbase.hyperedge import (
     Atom,
     Hyperedge,
@@ -17,7 +18,7 @@ from hyperbase.hyperedge import (
     unique,
 )
 from hyperbase.parsers import Parser, ParseResult
-from hyperbase.parsers.badness import badness_check, check_structural_quality
+from hyperbase.parsers.correctness import check_parse_correctness
 from hyperbase.parsers.utils import edge_depth_exceeds
 from spacy.language import Language
 from spacy.tokens import Doc, Span, Token
@@ -848,7 +849,7 @@ class AlphaBetaParser(Parser):
                     atom2word = self._generate_atom2word(edge, offset=offset)
                     if self._cur_trace is not None:
                         try:
-                            raw_final_badness = badness_check(
+                            raw_final_badness = check_parse_correctness(
                                 edge, [token.text for token in sent]
                             )
                             self._cur_trace.final_badness = {
@@ -2642,7 +2643,7 @@ class AlphaBetaParser(Parser):
         total: int = 0
         try:
             for issues in edge.check_correctness().values():
-                for _err_type, _msg in issues:
+                for _err_type, _msg, _severity in issues:
                     total += _BADNESS_WEIGHTS[0]
             for issues in check_structural_quality(edge).values():
                 for _err_type, _msg, severity in issues:
