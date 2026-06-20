@@ -143,6 +143,9 @@ def _generate_tok_pos(atom2word: dict[Atom, tuple[str, int]], edge: Hyperedge) -
         )
 
 
+_PARSER_INFO = {"name": "alphabeta"}
+
+
 class AlphaBetaParser(Parser):
     @classmethod
     def accepted_params(cls) -> dict[str, dict[str, Any]]:
@@ -873,6 +876,7 @@ class AlphaBetaParser(Parser):
                 tok_pos=hedge(tok_pos_str),
                 failed=failed,
                 extra=extra,
+                parser=_PARSER_INFO,
             )
         except _ParseTimeoutError:
             print(
